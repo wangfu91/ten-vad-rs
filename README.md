@@ -96,17 +96,84 @@ cargo test
 
 ## Examples
 
-Run the demo:
+The library includes several practical examples:
+
+### WAV File Processing
+
+Process any WAV file with automatic format conversion:
 
 ```bash
-cargo run
+# Basic usage
+cargo run --example wav_file_vad input.wav
+
+# The example automatically handles:
+# - Sample rate conversion (any rate → 16kHz)
+# - Channel mixing (stereo → mono)
+# - Provides detailed speech timing analysis
 ```
 
-This will demonstrate:
-- VAD version information
-- Processing silence
-- Processing synthetic audio
-- Batch processing multiple frames
+### Threshold Comparison
+
+Compare different threshold values on the same file:
+
+```bash
+cargo run --example threshold_comparison test_file.wav
+```
+
+### Create Test Files
+
+Generate test WAV files for experimentation:
+
+```bash
+# Create test files with different formats
+cargo run --example create_test_wav
+cargo run --example create_stereo_test
+```
+
+## Audio Format Support
+
+TenVAD operates on **16kHz mono audio**. The examples automatically handle:
+
+- **Sample Rate**: Any input rate is resampled to 16kHz using high-quality interpolation
+- **Channels**: Stereo/multi-channel audio is mixed down to mono
+- **Bit Depth**: Only 16-bit PCM is currently supported
+- **Hop Sizes**: Optimized for 160/256 samples (10/16ms frames)
+
+## Requirements
+
+- Rust 2024 edition
+- Windows x64 (current build configuration)  
+- TenVAD C library (included in `lib/` directory)
+
+## Dependencies
+
+- `hound`: WAV file reading/writing
+- `rubato`: High-quality audio resampling
+
+## Building
+
+```bash
+cargo build
+```
+
+## Testing
+
+```bash
+cargo test
+```
+
+## Running Examples
+
+```bash
+# Basic demo
+cargo run
+
+# WAV file analysis  
+cargo run --example wav_file_vad your_file.wav
+
+# Threshold comparison
+cargo run --example threshold_comparison your_file.wav
+```
 
 ## C Library Compatibility
 
