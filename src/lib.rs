@@ -1,9 +1,9 @@
-use crate::{
-    bindings::{
-        ten_vad_create, ten_vad_destroy, ten_vad_get_version, ten_vad_handle_t, ten_vad_process,
-    },
-    error::{TenVadError, TenVadResult},
+use crate::bindings::{
+    ten_vad_create, ten_vad_destroy, ten_vad_get_version, ten_vad_handle_t, ten_vad_process,
 };
+
+// Re-export error types for public API
+pub use crate::error::{TenVadError, TenVadResult};
 
 #[allow(non_camel_case_types)]
 #[allow(non_snake_case)]
