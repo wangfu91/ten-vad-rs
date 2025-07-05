@@ -12,16 +12,16 @@ fn main() {
     }
 
     let wav_file_path = &args[1];
-    
+
     // Test different threshold values
     let thresholds = [0.1, 0.3, 0.5, 0.7, 0.9];
-    
+
     println!("Comparing VAD performance with different thresholds");
     println!("File: {wav_file_path}\n");
 
     for threshold in thresholds {
         println!("🎯 Testing with threshold = {threshold:.1}");
-        
+
         let vad = TenVAD::new(256, threshold).unwrap_or_else(|e| {
             eprintln!("Error creating TenVAD: {e}");
             std::process::exit(1);
@@ -30,9 +30,14 @@ fn main() {
         match analyze_file(wav_file_path, &vad) {
             Ok(stats) => {
                 println!("   Speech segments: {}", stats.segment_count);
-                println!("   Total speech time: {:.2}s ({:.1}%)", 
-                         stats.total_speech_duration, stats.speech_percentage);
-                println!("   Average segment length: {:.0}ms", stats.avg_segment_length);
+                println!(
+                    "   Total speech time: {:.2}s ({:.1}%)",
+                    stats.total_speech_duration, stats.speech_percentage
+                );
+                println!(
+                    "   Average segment length: {:.0}ms",
+                    stats.avg_segment_length
+                );
             }
             Err(e) => {
                 eprintln!("   Error: {e}");
@@ -53,9 +58,9 @@ struct VadStats {
 fn analyze_file(wav_file_path: &str, vad: &TenVAD) -> Result<VadStats, String> {
     let file = File::open(wav_file_path).map_err(|e| format!("Failed to open file: {e}"))?;
     let mut reader = hound::WavReader::new(BufReader::new(file)).map_err(|e| e.to_string())?;
-    
+
     let spec = reader.spec();
-    
+
     // For simplicity, this example only handles 16kHz mono files
     if spec.sample_rate != 16000 {
         return Err("This threshold comparison example only supports 16kHz files".to_string());
@@ -83,7 +88,7 @@ fn analyze_file(wav_file_path: &str, vad: &TenVAD) -> Result<VadStats, String> {
         }
 
         let timestamp_ms = (frame_index * hop_size) as f32 / 16.0;
-        
+
         if let Ok(result) = vad.process_frame(chunk) {
             if result.is_voice {
                 if current_speech_start.is_none() {
@@ -95,7 +100,7 @@ fn analyze_file(wav_file_path: &str, vad: &TenVAD) -> Result<VadStats, String> {
                 current_speech_start = None;
             }
         }
-        
+
         frame_index += 1;
     }
 
@@ -107,10 +112,22 @@ fn analyze_file(wav_file_path: &str, vad: &TenVAD) -> Result<VadStats, String> {
     }
 
     let total_duration = (frame_index * hop_size) as f32 / 16000.0;
-    let total_speech_duration: f32 = speech_segments.iter().map(|(_, _, duration)| duration).sum::<f32>() / 1000.0;
-    let speech_percentage = if total_duration > 0.0 { (total_speech_duration / total_duration) * 100.0 } else { 0.0 };
+    let total_speech_duration: f32 = speech_segments
+        .iter()
+        .map(|(_, _, duration)| duration)
+        .sum::<f32>()
+        / 1000.0;
+    let speech_percentage = if total_duration > 0.0 {
+        (total_speech_duration / total_duration) * 100.0
+    } else {
+        0.0
+    };
     let avg_segment_length = if !speech_segments.is_empty() {
-        speech_segments.iter().map(|(_, _, duration)| duration).sum::<f32>() / speech_segments.len() as f32
+        speech_segments
+            .iter()
+            .map(|(_, _, duration)| duration)
+            .sum::<f32>()
+            / speech_segments.len() as f32
     } else {
         0.0
     };

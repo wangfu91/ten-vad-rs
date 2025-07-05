@@ -1,16 +1,18 @@
+use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::env;
-use std::time::Instant;
-use ten_vad_rs::TenVAD;
-use hound::{WavReader, WavWriter, WavSpec, SampleFormat};
 use std::fs::File;
 use std::io::BufReader;
+use std::time::Instant;
+use ten_vad_rs::TenVAD;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 || args.len() > 3 {
         eprintln!("Usage: {} <input_wav> [output_wav]", args[0]);
         eprintln!("Example: {} input.wav output_vad.wav", args[0]);
-        eprintln!("  This will process the input WAV and optionally create an output WAV with only voice segments");
+        eprintln!(
+            "  This will process the input WAV and optionally create an output WAV with only voice segments"
+        );
         std::process::exit(1);
     }
 
@@ -37,14 +39,20 @@ fn main() {
     }
 }
 
-fn process_realtime_vad(input_path: &str, output_path: Option<&String>, vad: &TenVAD) -> Result<(), Box<dyn std::error::Error>> {
+fn process_realtime_vad(
+    input_path: &str,
+    output_path: Option<&String>,
+    vad: &TenVAD,
+) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::open(input_path)?;
     let mut reader = WavReader::new(BufReader::new(file))?;
     let spec = reader.spec();
-    
-    println!("Input format: {}Hz, {} channels, {} bits", 
-             spec.sample_rate, spec.channels, spec.bits_per_sample);
-    
+
+    println!(
+        "Input format: {}Hz, {} channels, {} bits",
+        spec.sample_rate, spec.channels, spec.bits_per_sample
+    );
+
     if spec.sample_format != SampleFormat::Int || spec.bits_per_sample != 16 {
         return Err("Only 16-bit PCM WAV files are supported".into());
     }
@@ -75,9 +83,7 @@ fn process_realtime_vad(input_path: &str, output_path: Option<&String>, vad: &Te
     println!("Press Ctrl+C to stop (simulated)\n");
 
     // Read all samples first (in real-time, this would be a stream)
-    let all_samples: Vec<i16> = reader
-        .samples::<i16>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let all_samples: Vec<i16> = reader.samples::<i16>().collect::<Result<Vec<_>, _>>()?;
 
     // Convert to mono if needed
     let mono_samples = if spec.channels == 1 {
@@ -94,7 +100,10 @@ fn process_realtime_vad(input_path: &str, output_path: Option<&String>, vad: &Te
 
     // Resample if needed (simplified - in real implementation you'd use proper resampling)
     let processed_samples = if spec.sample_rate != 16000 {
-        println!("Note: Resampling from {}Hz to 16000Hz (simplified)", spec.sample_rate);
+        println!(
+            "Note: Resampling from {}Hz to 16000Hz (simplified)",
+            spec.sample_rate
+        );
         // Simple decimation for demo purposes
         let ratio = spec.sample_rate as f64 / 16000.0;
         mono_samples
@@ -113,27 +122,30 @@ fn process_realtime_vad(input_path: &str, output_path: Option<&String>, vad: &Te
         }
 
         samples.extend_from_slice(chunk);
-        
+
         // Simulate real-time processing delay
         let start_time = Instant::now();
-        
+
         // Process the frame
         let result = vad.process_frame(chunk)?;
-        
+
         let processing_time = start_time.elapsed().as_secs_f64() * 1000.0; // ms
         total_processing_time += processing_time;
-        
+
         let timestamp_ms = (frame_count * hop_size) as f64 / 16.0; // 16kHz = 16 samples per ms
-        
+
         if result.is_voice {
             voice_frame_count += 1;
-            
+
             // Start new voice segment or continue existing one
             if current_voice_segment.is_none() {
                 current_voice_segment = Some(Vec::new());
-                print!("🎤 Voice detected at {:.0}ms (prob: {:.2})", timestamp_ms, result.probability);
+                print!(
+                    "🎤 Voice detected at {:.0}ms (prob: {:.2})",
+                    timestamp_ms, result.probability
+                );
             }
-            
+
             // Add samples to current voice segment
             if let Some(ref mut segment) = current_voice_segment {
                 segment.extend_from_slice(chunk);
@@ -144,24 +156,27 @@ fn process_realtime_vad(input_path: &str, output_path: Option<&String>, vad: &Te
                 let end_time = timestamp_ms;
                 let duration = segment.len() as f64 / 16.0; // Duration in ms
                 println!(" → ended at {end_time:.0}ms ({duration:.0}ms duration)");
-                
+
                 // Write to output file if requested
                 if let Some(ref mut w) = writer {
                     for sample in &segment {
                         w.write_sample(*sample)?;
                     }
                 }
-                
+
                 voice_segments.push((timestamp_ms - duration, end_time, segment));
             }
         }
-        
+
         frame_count += 1;
-        
+
         // Show progress every 1000 frames (~16 seconds)
         if frame_count % 1000 == 0 {
-            println!("📊 Processed {:.1}s of audio ({} frames)", 
-                     timestamp_ms / 1000.0, frame_count);
+            println!(
+                "📊 Processed {:.1}s of audio ({} frames)",
+                timestamp_ms / 1000.0,
+                frame_count
+            );
         }
     }
 
@@ -170,13 +185,13 @@ fn process_realtime_vad(input_path: &str, output_path: Option<&String>, vad: &Te
         let end_time = (frame_count * hop_size) as f64 / 16.0;
         let duration = segment.len() as f64 / 16.0;
         println!(" → ended at {end_time:.0}ms ({duration:.0}ms duration)");
-        
+
         if let Some(ref mut w) = writer {
             for sample in &segment {
                 w.write_sample(*sample)?;
             }
         }
-        
+
         voice_segments.push((end_time - duration, end_time, segment));
     }
 
@@ -194,18 +209,22 @@ fn process_realtime_vad(input_path: &str, output_path: Option<&String>, vad: &Te
         .sum();
     let avg_processing_time = total_processing_time / frame_count as f64;
     let real_time_factor = (total_audio_duration * 1000.0) / total_processing_time;
-    
+
     println!("\n📊 Processing Statistics:");
     println!("Total audio duration: {total_audio_duration:.2}s");
     println!("Total frames processed: {frame_count}");
-    println!("Voice frames detected: {voice_frame_count} ({:.1}%)", 
-             (voice_frame_count as f64 / frame_count as f64) * 100.0);
+    println!(
+        "Voice frames detected: {voice_frame_count} ({:.1}%)",
+        (voice_frame_count as f64 / frame_count as f64) * 100.0
+    );
     println!("Voice segments found: {}", voice_segments.len());
-    println!("Total voice duration: {total_voice_duration:.2}s ({:.1}%)", 
-             (total_voice_duration / total_audio_duration) * 100.0);
+    println!(
+        "Total voice duration: {total_voice_duration:.2}s ({:.1}%)",
+        (total_voice_duration / total_audio_duration) * 100.0
+    );
     println!("Average processing time per frame: {avg_processing_time:.3}ms");
     println!("Real-time factor: {real_time_factor:.1}x (higher is better)");
-    
+
     if real_time_factor > 1.0 {
         println!("✅ Processing is faster than real-time!");
     } else {
@@ -216,8 +235,14 @@ fn process_realtime_vad(input_path: &str, output_path: Option<&String>, vad: &Te
         println!("\n🎯 Voice Segments Details:");
         for (i, (start, end, segment)) in voice_segments.iter().enumerate() {
             let duration = segment.len() as f64 / 16000.0;
-            println!("  {}. {:.2}s - {:.2}s ({:.2}s duration, {} samples)", 
-                     i + 1, start / 1000.0, end / 1000.0, duration, segment.len());
+            println!(
+                "  {}. {:.2}s - {:.2}s ({:.2}s duration, {} samples)",
+                i + 1,
+                start / 1000.0,
+                end / 1000.0,
+                duration,
+                segment.len()
+            );
         }
     }
 
