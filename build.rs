@@ -11,6 +11,7 @@ fn main() {
         let native = PathBuf::from(format!("{lib_dir}/windows"));
         #[cfg(target_arch = "x86")]
         let arch = "x86";
+
         #[cfg(target_arch = "x86_64")]
         let arch = "x64";
 
@@ -39,4 +40,25 @@ fn main() {
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+
+    // Copy the ten_vad.dll to the target directory where the executable will be
+    #[cfg(target_os = "windows")]
+    {
+        use std::fs;
+
+        let dll_path = lib_path.join("ten_vad.dll");
+
+        // Get the target directory (e.g., target/debug or target/release)
+        let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+        let target_dir = env::var("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("target"));
+        let exe_dir = target_dir.join(&profile);
+
+        // Ensure the target directory exists
+        fs::create_dir_all(&exe_dir).expect("Failed to create target directory");
+
+        let target_dll_path = exe_dir.join("ten_vad.dll");
+        fs::copy(&dll_path, &target_dll_path).expect("Failed to copy ten_vad.dll");
+    }
 }

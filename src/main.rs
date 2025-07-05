@@ -6,17 +6,17 @@ mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
+use std::ffi::CStr;
+
 #[allow(unused_imports)]
 use bindings::*;
 
 fn main() {
-    println!("Hello, world!");
-
     // Test that the bindings are accessible
     unsafe {
         let version = ten_vad_get_version();
         if !version.is_null() {
-            let version_str = std::ffi::CStr::from_ptr(version);
+            let version_str = CStr::from_ptr(version);
             println!("ten_vad version: {:?}", version_str.to_string_lossy());
         }
     }
