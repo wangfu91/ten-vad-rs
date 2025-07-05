@@ -44,9 +44,6 @@ doc-scrape-examples = true
 name = "realtime_vad_demo"
 doc-scrape-examples = true
 
-[[example]]
-name = "test_errors"
-doc-scrape-examples = true
 
 [dependencies]
 hound = "3.5.1"
