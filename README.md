@@ -112,23 +112,6 @@ cargo run --example wav_file_vad input.wav
 # - Provides detailed speech timing analysis
 ```
 
-### Threshold Comparison
-
-Compare different threshold values on the same file:
-
-```bash
-cargo run --example threshold_comparison test_file.wav
-```
-
-### Create Test Files
-
-Generate test WAV files for experimentation:
-
-```bash
-# Create test files with different formats
-cargo run --example create_test_wav
-cargo run --example create_stereo_test
-```
 
 ## Audio Format Support
 
@@ -142,13 +125,7 @@ TenVAD operates on **16kHz mono audio**. The examples automatically handle:
 ## Requirements
 
 - Rust 2024 edition
-- Windows x64 (current build configuration)  
 - TenVAD C library (included in `lib/` directory)
-
-## Dependencies
-
-- `hound`: WAV file reading/writing
-- `rubato`: High-quality audio resampling
 
 ## Building
 
@@ -165,14 +142,8 @@ cargo test
 ## Running Examples
 
 ```bash
-# Basic demo
-cargo run
-
 # WAV file analysis  
 cargo run --example wav_file_vad your_file.wav
-
-# Threshold comparison
-cargo run --example threshold_comparison your_file.wav
 ```
 
 ## C Library Compatibility
