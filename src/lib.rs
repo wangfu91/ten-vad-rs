@@ -3,6 +3,7 @@ use crate::bindings::{
 };
 
 // Re-export error types for public API
+pub use crate::audio_segment::AudioSegment;
 pub use crate::error::{TenVadError, TenVadResult};
 
 #[allow(non_camel_case_types)]
@@ -12,6 +13,7 @@ pub use crate::error::{TenVadError, TenVadResult};
 mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
+mod audio_segment;
 mod error;
 
 /// Result of VAD processing for a single frame
