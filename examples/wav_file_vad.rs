@@ -1,7 +1,4 @@
 use anyhow::anyhow;
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
 use std::env;
 use std::fs::File;
 use std::io::BufReader;
@@ -9,6 +6,7 @@ use ten_vad_rs::{AudioSegment, TenVAD, utils};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
 const THRESHOLD: f32 = 0.5; // Default threshold for VAD
+const TARGET_SAMPLE_RATE: u32 = 16000; // Target sample rate for VAD (16kHz)
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -37,27 +35,6 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn preprocess_audio(
-    samples: &[i16],
-    channels: u32,
-    input_sample_rate: u32,
-    output_sample_rate: u32,
-) -> anyhow::Result<Vec<i16>> {
-    // Convert stereo to mono if needed
-    let mono_samples = if channels > 1 {
-        utils::convert_to_mono(samples, channels)
-    } else {
-        samples.to_vec()
-    };
-
-    // Resample to 16kHz if necessary
-    utils::resampling(&mono_samples, input_sample_rate, output_sample_rate).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to resample audio from {input_sample_rate}Hz to {output_sample_rate}Hz: {e}"
-        )
-    })
-}
-
 fn process_wav_file(wav_file_path: &str, vad: &TenVAD) -> anyhow::Result<()> {
     let file = File::open(wav_file_path)?;
     let mut reader = hound::WavReader::new(BufReader::new(file))?;
@@ -77,10 +54,16 @@ fn process_wav_file(wav_file_path: &str, vad: &TenVAD) -> anyhow::Result<()> {
 
     let all_samples = reader.samples::<i16>().collect::<Result<Vec<i16>, _>>()?;
 
-    let processed_samples =
-        preprocess_audio(&all_samples, spec.channels as u32, spec.sample_rate, 16000)?;
+    let processed_samples = preprocess_audio(
+        &all_samples,
+        spec.channels as u32,
+        spec.sample_rate,
+        TARGET_SAMPLE_RATE,
+    )?;
 
-    while let Some(frame) = audio_segment.append_samples(&processed_samples) {
+    audio_segment.append_samples(&processed_samples);
+
+    while let Some(frame) = audio_segment.get_fixed_size_samples() {
         match vad.process_frame(&frame) {
             Ok(result) => {
                 if result.is_voice {
@@ -99,4 +82,25 @@ fn process_wav_file(wav_file_path: &str, vad: &TenVAD) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn preprocess_audio(
+    samples: &[i16],
+    channels: u32,
+    input_sample_rate: u32,
+    output_sample_rate: u32,
+) -> anyhow::Result<Vec<i16>> {
+    // Convert stereo to mono if needed
+    let mono_samples = if channels > 1 {
+        utils::convert_to_mono(samples, channels)
+    } else {
+        samples.to_vec()
+    };
+
+    // Resample to 16kHz if necessary
+    utils::resampling(&mono_samples, input_sample_rate, output_sample_rate).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to resample audio from {input_sample_rate}Hz to {output_sample_rate}Hz: {e}"
+        )
+    })
 }
