@@ -125,8 +125,12 @@ impl TenVAD {
     {
         if audio_data.len() % self.hop_size != 0 {
             return Err(TenVadError::AudioSizeMismatch {
-                expected: audio_data.len() - (audio_data.len() % self.hop_size),
+                expected: self.hop_size,
                 actual: audio_data.len(),
+                message: format!(
+                    "Audio data length must be a multiple of hop_size ({}).",
+                    self.hop_size
+                ),
             });
         }
 
