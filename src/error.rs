@@ -3,10 +3,6 @@ use thiserror::Error;
 /// Custom error types for TenVAD operations
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum TenVadError {
-    /// Invalid parameter provided
-    #[error("Invalid parameter: {0}")]
-    InvalidParameter(String),
-
     /// Audio data size mismatch
     #[error("Audio size mismatch: expected {expected}, got {actual}")]
     AudioSizeMismatch { expected: usize, actual: usize },
