@@ -49,10 +49,15 @@ pub fn convert_to_mono(data: &[i16], channels: u32) -> Vec<i16> {
     if channels == 1 {
         data.to_vec()
     } else {
-        data.chunks_exact(channels as usize)
+        data.chunks(channels as usize)
             .map(|frame| {
                 let sum: i32 = frame.iter().map(|&s| s as i32).sum();
-                (sum / channels as i32) as i16
+                let divisor = if frame.len() < channels as usize {
+                    frame.len() as i32
+                } else {
+                    channels as i32
+                };
+                (sum / divisor) as i16
             })
             .collect()
     }
