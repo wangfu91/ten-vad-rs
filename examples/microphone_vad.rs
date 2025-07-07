@@ -1,11 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
 use ten_vad_rs::{AudioSegment, utils};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
-const THRESHOLD: f32 = 0.5;
+const THRESHOLD: f32 = 0.5; // Default threshold for VAD
 const TARGET_SAMPLE_RATE: u32 = 16000; // Target sample rate for VAD (16kHz)
 
 fn main() -> anyhow::Result<()> {
@@ -44,7 +41,9 @@ fn main() -> anyhow::Result<()> {
             let samples =
                 preprocess_audio(data, channels as u32, sample_rate, TARGET_SAMPLE_RATE).unwrap();
 
-            while let Some(frame) = audio_segment.append_samples(&samples) {
+            audio_segment.append_samples(&samples);
+
+            while let Some(frame) = audio_segment.get_fixed_size_samples() {
                 // Process each frame of audio data
                 match vad.process_frame(&frame) {
                     Ok(result) => {

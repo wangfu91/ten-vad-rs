@@ -18,23 +18,13 @@ impl<T: AudioSample> AudioSegment<T> {
         }
     }
 
-    pub fn append_samples(&mut self, new_samples: &[T]) -> Option<Vec<T>> {
+    pub fn append_samples(&mut self, new_samples: &[T]) {
         // Append new samples to buffer
         self.samples.extend(new_samples);
-
-        // If we have enough samples, return a chunk
-        if self.samples.len() >= self.target_size {
-            Some(self.samples.drain(..self.target_size).collect())
-        } else {
-            None
-        }
     }
 
-    pub fn append_sample(&mut self, sample: T) -> Option<Vec<T>> {
-        // Append single sample
-        self.samples.push_back(sample);
-
-        // If we have enough samples, return a chunk
+    pub fn get_fixed_size_samples(&mut self) -> Option<Vec<T>> {
+        // If we have enough samples, return a fixed-size chunk
         if self.samples.len() >= self.target_size {
             Some(self.samples.drain(..self.target_size).collect())
         } else {
