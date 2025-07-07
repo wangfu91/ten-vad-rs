@@ -17,23 +17,12 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-[profile.release-with-debug]
-inherits = "release"
-debug = true
-strip = false
-
 [profile.bench]
 inherits = "release"
 debug = true
 
-# Features for optional optimizations
-[features]
-default = []
-parallel = ["rayon"]
-
 [dependencies]
 rubato = "0.16.2"
-rayon = { version = "1.8.0", optional = true }
 thiserror = "2.0.12"
 
 [build-dependencies]
@@ -41,11 +30,5 @@ bindgen = "0.72.0"
 
 [dev-dependencies]
 hound = "3.5.1"
-criterion = "0.6.0"
 cpal = "0.16.0"
 anyhow = "1.0.98"
-
-# Benchmark targets
-[[bench]]
-name = "vad_benchmark"
-harness = false

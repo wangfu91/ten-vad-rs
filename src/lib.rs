@@ -15,6 +15,7 @@ mod bindings {
 }
 mod audio_segment;
 mod error;
+pub mod utils;
 
 /// Result of VAD processing for a single frame
 #[derive(Debug, Clone, PartialEq)]
@@ -68,28 +69,6 @@ impl TenVAD {
         })
     }
 
-    /// Create a new TenVAD instance with a preset configuration
-    ///
-    /// # Arguments
-    /// * `preset` - A function returning (hop_size, threshold) configuration
-    ///
-    /// # Returns
-    /// Returns `Ok(TenVAD)` on success, or `Err(TenVadError)` on failure.
-    ///
-    /// # Examples
-    /// ```ignore
-    /// # use ten_vad_rs::{TenVAD, VadPresets};
-    /// let vad = TenVAD::with_preset(VadPresets::low_latency).unwrap();
-    /// let vad = TenVAD::with_preset(VadPresets::high_accuracy).unwrap();
-    /// ```
-    pub fn with_preset<F>(preset: F) -> TenVadResult<Self>
-    where
-        F: FnOnce() -> (usize, f32),
-    {
-        let (hop_size, threshold) = preset();
-        Self::new(hop_size, threshold)
-    }
-
     /// Process a single frame of audio data
     ///
     /// # Arguments
@@ -126,81 +105,6 @@ impl TenVAD {
             probability: out_probability,
             is_voice: out_flag != 0,
         })
-    }
-
-    /// Process multiple frames of audio data
-    ///
-    /// # Arguments
-    /// * `audio_data` - Audio samples as i16 PCM data. Length must be a multiple of hop_size.
-    ///
-    /// # Returns
-    /// Returns `Ok(Vec<VadResult>)` with results for each frame, or `Err(TenVadError)` on failure.
-    pub fn process_frames(&self, audio_data: &[i16]) -> TenVadResult<Vec<VadResult>> {
-        if audio_data.len() % self.hop_size != 0 {
-            return Err(TenVadError::AudioSizeMismatch {
-                expected: audio_data.len() - (audio_data.len() % self.hop_size),
-                actual: audio_data.len(),
-            });
-        }
-
-        let frame_count = audio_data.len() / self.hop_size;
-        let mut results = Vec::with_capacity(frame_count);
-
-        for i in 0..frame_count {
-            let start_idx = i * self.hop_size;
-            let end_idx = start_idx + self.hop_size;
-            let frame_data = &audio_data[start_idx..end_idx];
-
-            let result = self.process_frame(frame_data)?;
-            results.push(result);
-        }
-
-        Ok(results)
-    }
-
-    /// Process multiple frames with parallel execution (requires 'parallel' feature)
-    ///
-    /// # Arguments
-    /// * `audio_data` - Audio samples as i16 PCM data. Length must be a multiple of hop_size.
-    ///
-    /// # Returns
-    /// Returns `Ok(Vec<VadResult>)` with results for each frame, or `Err(TenVadError)` on failure.
-    #[cfg(feature = "parallel")]
-    pub fn process_frames_parallel(&self, audio_data: &[i16]) -> TenVadResult<Vec<VadResult>> {
-        use rayon::prelude::*;
-
-        if audio_data.len() % self.hop_size != 0 {
-            return Err(TenVadError::AudioSizeMismatch {
-                expected: audio_data.len() - (audio_data.len() % self.hop_size),
-                actual: audio_data.len(),
-            });
-        }
-
-        let frame_count = audio_data.len() / self.hop_size;
-        let hop_size = self.hop_size;
-
-        // Create separate VAD instances for parallel processing
-        let vad_instances: TenVadResult<Vec<_>> = (0..rayon::current_num_threads())
-            .map(|_| TenVAD::new(hop_size, self.threshold))
-            .collect();
-
-        let vad_instances = vad_instances?;
-
-        // Process frames in parallel
-        let results: TenVadResult<Vec<_>> = (0..frame_count)
-            .into_par_iter()
-            .map(|i| {
-                let start_idx = i * hop_size;
-                let end_idx = start_idx + hop_size;
-                let frame_data = &audio_data[start_idx..end_idx];
-
-                let vad = &vad_instances
-                    [rayon::current_thread_index().unwrap_or(0) % vad_instances.len()];
-                vad.process_frame(frame_data)
-            })
-            .collect();
-
-        results
     }
 
     /// Process frames with a streaming callback for memory efficiency
@@ -313,53 +217,6 @@ impl Drop for TenVAD {
     }
 }
 
-/// Configuration presets for different use cases
-pub struct VadPresets;
-
-impl VadPresets {
-    /// Low-latency preset for real-time applications
-    /// - Small hop size (128 samples = 8ms frames)
-    /// - Moderate sensitivity
-    pub fn low_latency() -> (usize, f32) {
-        (128, 0.5)
-    }
-
-    /// Balanced preset for general use
-    /// - Standard hop size (256 samples = 16ms frames)
-    /// - Moderate sensitivity
-    pub fn balanced() -> (usize, f32) {
-        (256, 0.5)
-    }
-
-    /// High-accuracy preset for offline processing
-    /// - Large hop size (512 samples = 32ms frames)
-    /// - Lower sensitivity for fewer false positives
-    pub fn high_accuracy() -> (usize, f32) {
-        (512, 0.3)
-    }
-
-    /// Sensitive preset for quiet speech
-    /// - Standard hop size
-    /// - High sensitivity
-    pub fn sensitive() -> (usize, f32) {
-        (256, 0.2)
-    }
-
-    /// Conservative preset for noisy environments
-    /// - Standard hop size
-    /// - Low sensitivity to reduce false positives
-    pub fn conservative() -> (usize, f32) {
-        (256, 0.8)
-    }
-
-    /// Battery-efficient preset for mobile devices
-    /// - Large hop size for fewer computations
-    /// - Moderate sensitivity
-    pub fn battery_efficient() -> (usize, f32) {
-        (512, 0.5)
-    }
-}
-
 unsafe impl Send for TenVAD {}
 unsafe impl Sync for TenVAD {}
 
@@ -426,41 +283,6 @@ mod tests {
         // Create audio data with wrong size
         let audio_data = vec![0i16; 128]; // Wrong size
         let result = vad.process_frame(&audio_data);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            TenVadError::AudioSizeMismatch { .. }
-        ));
-    }
-
-    #[test]
-    fn test_process_frames() {
-        let vad = TenVAD::new(256, 0.5).unwrap();
-
-        // Create dummy audio data for 3 frames
-        let audio_data = vec![0i16; 256 * 3];
-        let results = vad.process_frames(&audio_data);
-        assert!(results.is_ok());
-
-        let vad_results = results.unwrap();
-        assert_eq!(vad_results.len(), 3);
-
-        for (i, result) in vad_results.iter().enumerate() {
-            assert!(result.probability >= 0.0 && result.probability <= 1.0);
-            println!(
-                "Frame {} - Probability: {}, Is voice: {}",
-                i, result.probability, result.is_voice
-            );
-        }
-    }
-
-    #[test]
-    fn test_process_frames_wrong_size() {
-        let vad = TenVAD::new(256, 0.5).unwrap();
-
-        // Create audio data with wrong size (not multiple of hop_size)
-        let audio_data = vec![0i16; 256 * 2 + 128]; // Wrong size
-        let result = vad.process_frames(&audio_data);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -562,36 +384,6 @@ mod tests {
 
         println!("VAD1 result: {:?}", result1.unwrap());
         println!("VAD2 result: {:?}", result2.unwrap());
-    }
-
-    #[test]
-    fn test_presets() {
-        // Test all presets can be created successfully
-        let vad = TenVAD::with_preset(VadPresets::low_latency);
-        assert!(vad.is_ok());
-        let vad = vad.unwrap();
-        assert_eq!(vad.hop_size(), 128);
-        assert_eq!(vad.threshold(), 0.5);
-
-        let vad = TenVAD::with_preset(VadPresets::balanced).unwrap();
-        assert_eq!(vad.hop_size(), 256);
-        assert_eq!(vad.threshold(), 0.5);
-
-        let vad = TenVAD::with_preset(VadPresets::high_accuracy).unwrap();
-        assert_eq!(vad.hop_size(), 512);
-        assert_eq!(vad.threshold(), 0.3);
-
-        let vad = TenVAD::with_preset(VadPresets::sensitive).unwrap();
-        assert_eq!(vad.hop_size(), 256);
-        assert_eq!(vad.threshold(), 0.2);
-
-        let vad = TenVAD::with_preset(VadPresets::conservative).unwrap();
-        assert_eq!(vad.hop_size(), 256);
-        assert_eq!(vad.threshold(), 0.8);
-
-        let vad = TenVAD::with_preset(VadPresets::battery_efficient).unwrap();
-        assert_eq!(vad.hop_size(), 512);
-        assert_eq!(vad.threshold(), 0.5);
     }
 
     #[test]
