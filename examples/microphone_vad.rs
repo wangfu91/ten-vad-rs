@@ -2,10 +2,11 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-use ten_vad_rs::AudioSegment;
+use ten_vad_rs::{AudioSegment, utils};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
 const THRESHOLD: f32 = 0.5;
+const TARGET_SAMPLE_RATE: u32 = 16000; // Target sample rate for VAD (16kHz)
 
 fn main() -> anyhow::Result<()> {
     println!("TenVAD Microphone Example");
@@ -20,7 +21,6 @@ fn main() -> anyhow::Result<()> {
         vad.hop_size(),
         vad.threshold()
     );
-    println!("Listening for speech (16ms frames)...");
 
     let host = cpal::default_host();
     let input_device = host
@@ -41,13 +41,8 @@ fn main() -> anyhow::Result<()> {
     let input_stream = input_device.build_input_stream(
         &input_stream_config.into(),
         move |data: &[i16], _| {
-            let samples = preprocess_audio(
-                data,
-                channels as u32,
-                sample_rate,
-                16000, // Resample to 16kHz
-            )
-            .unwrap();
+            let samples =
+                preprocess_audio(data, channels as u32, sample_rate, TARGET_SAMPLE_RATE).unwrap();
 
             while let Some(frame) = audio_segment.append_samples(&samples) {
                 // Process each frame of audio data
@@ -83,67 +78,15 @@ fn preprocess_audio(
 ) -> anyhow::Result<Vec<i16>> {
     // Convert stereo to mono if needed
     let mono_samples = if channels > 1 {
-        convert_to_mono(samples, channels)
+        utils::convert_to_mono(samples, channels)
     } else {
         samples.to_vec()
     };
 
     // Resample to 16kHz if necessary
-    resample_to_16khz(&mono_samples, input_sample_rate, output_sample_rate)
-}
-
-fn resample_to_16khz(
-    mono_i16_samples: &[i16],
-    input_sample_rate: u32,
-    output_sample_rate: u32,
-) -> anyhow::Result<Vec<i16>> {
-    if input_sample_rate == output_sample_rate {
-        return Ok(mono_i16_samples.to_vec());
-    }
-
-    // Convert i16 to f32 for resampling
-    let f32_samples: Vec<f32> = mono_i16_samples
-        .iter()
-        .map(|&s| s as f32 / i16::MAX as f32)
-        .collect();
-
-    let params = SincInterpolationParameters {
-        sinc_len: 256,
-        f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 256,
-        window: WindowFunction::BlackmanHarris2,
-    };
-
-    let mut resampler = SincFixedIn::<f32>::new(
-        output_sample_rate as f64 / input_sample_rate as f64,
-        2.0, // max_relative_ratio
-        params,
-        f32_samples.len(),
-        1, // channels
-    )?;
-
-    // Perform resampling
-    let output_f32_samples = resampler.process(&[f32_samples], None)?;
-
-    // Convert back to i16
-    let output_i16_samples: Vec<i16> = output_f32_samples[0]
-        .iter()
-        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-        .collect();
-
-    Ok(output_i16_samples)
-}
-
-fn convert_to_mono(data: &[i16], channels: u32) -> Vec<i16> {
-    if channels == 1 {
-        data.to_vec()
-    } else {
-        data.chunks_exact(channels as usize)
-            .map(|frame| {
-                let sum: i32 = frame.iter().map(|&s| s as i32).sum();
-                (sum / channels as i32) as i16
-            })
-            .collect()
-    }
+    utils::resampling(&mono_samples, input_sample_rate, output_sample_rate).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to resample audio from {input_sample_rate}Hz to {output_sample_rate}Hz: {e}"
+        )
+    })
 }

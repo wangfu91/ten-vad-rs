@@ -29,4 +29,16 @@ impl<T: AudioSample> AudioSegment<T> {
             None
         }
     }
+
+    pub fn append_sample(&mut self, sample: T) -> Option<Vec<T>> {
+        // Append single sample
+        self.samples.push_back(sample);
+
+        // If we have enough samples, return a chunk
+        if self.samples.len() >= self.target_size {
+            Some(self.samples.drain(..self.target_size).collect())
+        } else {
+            None
+        }
+    }
 }
