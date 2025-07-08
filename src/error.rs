@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 /// Custom error types for TenVAD operations
-#[derive(Error, Debug, Clone, PartialEq)]
+#[derive(Error, Debug)]
 pub enum TenVadError {
     /// Audio data size mismatch
     #[error("Audio size mismatch: expected {expected}, got {actual}")]
@@ -22,6 +22,9 @@ pub enum TenVadError {
     /// Invalid hop size
     #[error("Invalid hop size {0}: must be greater than 0")]
     InvalidHopSize(usize),
+
+    #[error("Failed to run ONNX session: {0}")]
+    OnnxRuntimeError(#[from] ort::Error),
 }
 
 // Conversion from TenVadError to String for backwards compatibility

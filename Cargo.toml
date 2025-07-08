@@ -22,8 +22,11 @@ inherits = "release"
 debug = true
 
 [dependencies]
+ndarray = "0.16.1"
+ort = "=2.0.0-rc.10"
 rubato = "0.16.2"
 thiserror = "2.0.12"
+rustfft = "6.2.0"
 
 [build-dependencies]
 bindgen = "0.72.0"

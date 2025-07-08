@@ -15,6 +15,7 @@ mod bindings {
 }
 mod audio_segment;
 mod error;
+pub mod onnx;
 pub mod utils;
 
 /// Result of VAD processing for a single frame
