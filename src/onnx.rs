@@ -6,10 +6,6 @@ use ort::{session::Session, value::TensorRef};
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 use std::{f32::consts::PI, sync::Arc};
 
-const HOP_SIZE: usize = 256; // 16ms at 16kHz
-const THRESHOLD: f32 = 0.5; // Default threshold for VAD
-const TARGET_SAMPLE_RATE: u32 = 16000; // Target sample rate for VAD (16kHz)
-
 const FFT_SIZE: usize = 1024;
 const WINDOW_SIZE: usize = 768;
 const MEL_FILTER_BANK_NUM: usize = 40;
@@ -373,12 +369,12 @@ mod tests {
     fn test_generate_hann_window() {
         let window = TenVadOnnx::generate_hann_window();
         assert_eq!(window.len(), WINDOW_SIZE);
-        assert!(window.iter().all(|&x| x >= 0.0 && x <= 1.0));
+        assert!(window.iter().all(|&x| (0.0..=1.0).contains(&x)));
     }
 
     #[test]
     fn test_pre_emphasis() {
-        let mut vad = TenVadOnnx::new("dummy.onnx", 0.5).unwrap();
+        let mut vad = TenVadOnnx::new("onnx/ten-vad.onnx", 0.5).unwrap();
         let audio_frame = vec![0.0, 1.0, 2.0, 3.0, 4.0];
         let emphasized = vad.pre_emphasis(&audio_frame);
         assert_eq!(emphasized.len(), audio_frame.len());
@@ -386,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_extract_features() {
-        let mut vad = TenVadOnnx::new("dummy.onnx", 0.5).unwrap();
+        let mut vad = TenVadOnnx::new("onnx/ten-vad.onnx", 0.5).unwrap();
         let audio_frame = vec![0.0; WINDOW_SIZE]; // Zero input for simplicity
         let features = vad.extract_features(&audio_frame);
         assert_eq!(features.len(), FEATURE_LEN);
