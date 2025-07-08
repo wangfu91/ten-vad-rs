@@ -3,35 +3,26 @@ use thiserror::Error;
 /// Custom error types for TenVAD operations
 #[derive(Error, Debug)]
 pub enum TenVadError {
-    /// Audio data size mismatch
-    #[error("Audio size mismatch: expected {expected}, got {actual}")]
-    AudioSizeMismatch { expected: usize, actual: usize },
-
-    /// Native library error
-    #[error("Native library error: {0}")]
-    NativeError(i32),
-
-    /// Resource allocation failure
-    #[error("Failed to allocate resources")]
-    AllocationError,
-
-    /// Invalid threshold value
-    #[error("Invalid threshold {0}: must be between 0.0 and 1.0")]
-    InvalidThreshold(f32),
-
-    /// Invalid hop size
-    #[error("Invalid hop size {0}: must be greater than 0")]
-    InvalidHopSize(usize),
-
     #[error("Failed to run ONNX session: {0}")]
     OnnxRuntimeError(#[from] ort::Error),
-}
 
-// Conversion from TenVadError to String for backwards compatibility
-impl From<TenVadError> for String {
-    fn from(error: TenVadError) -> Self {
-        error.to_string()
-    }
+    #[error("Invalid audio frame size: expected {expected}, got {actual}")]
+    InvalidFrameSize { expected: usize, actual: usize },
+
+    #[error("Invalid sample rate: {rate} Hz (supported rates: 8000, 16000, 22050, 44100, 48000)")]
+    InvalidSampleRate { rate: u32 },
+
+    #[error("Empty audio data provided")]
+    EmptyAudioData,
+
+    #[error("Model initialization failed: {message}")]
+    ModelInitializationError { message: String },
+
+    #[error("Feature extraction failed: {reason}")]
+    FeatureExtractionError { reason: String },
+
+    #[error("Audio preprocessing error: {0}")]
+    AudioPreprocessingError(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Type alias for TenVAD results
