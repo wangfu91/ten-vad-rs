@@ -27,7 +27,7 @@ const PRE_EMPHASIS_COEFF: f32 = 0.97;
 
 /// Means of input-mel-filterbank (from coeff.h)
 #[rustfmt::skip]
-pub const FEATURE_MEANS: [f32; 41] = [
+const FEATURE_MEANS: [f32; 41] = [
     -8.198236465454e+00, -6.265716552734e+00, -5.483818531036e+00,
     -4.758691310883e+00, -4.417088985443e+00, -4.142892837524e+00,
     -3.912850379944e+00, -3.845927953720e+00, -3.657090425491e+00,
@@ -46,7 +46,7 @@ pub const FEATURE_MEANS: [f32; 41] = [
 
 /// Stds of input-mel-filterbank (from coeff.h)
 #[rustfmt::skip]
-pub const FEATURE_STDS: [f32; 41] = [
+const FEATURE_STDS: [f32; 41] = [
     5.166063785553e+00, 4.977209568024e+00, 4.698895931244e+00,
     4.630621433258e+00, 4.634347915649e+00, 4.641156196594e+00,
     4.640676498413e+00, 4.666367053986e+00, 4.650534629822e+00,
@@ -63,6 +63,7 @@ pub const FEATURE_STDS: [f32; 41] = [
     5.096439361572e+00, 1.152136917114e+02
 ];
 
+/// TEN VAD ONNX model wrapper
 pub struct TenVad {
     session: Session,                // ONNX session for inference
     hidden_states: Vec<Array2<f32>>, // Vector of 2D arrays: [MODEL_IO_NUM - 1] each [1, MODEL_HIDDEN_DIM]

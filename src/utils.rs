@@ -2,6 +2,14 @@ use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
+/// Resample mono i16 audio samples from `input_sample_rate` to `output_sample_rate`.
+/// # Arguments:
+/// - `mono_i16_samples`: Input audio samples in i16 format.
+/// - `input_sample_rate`: Sample rate of the input audio.
+/// - `output_sample_rate`: Desired sample rate for the output audio.
+/// # Returns:
+/// - `Ok(Vec<i16>)`: Resampled audio samples in i16 format.
+/// - `Err(Box<dyn std::error::Error>)`: If resampling fails, returns an error boxed trait object.
 pub fn resampling(
     mono_i16_samples: &[i16],
     input_sample_rate: u32,
@@ -45,6 +53,12 @@ pub fn resampling(
     Ok(output_i16_samples)
 }
 
+/// Convert stereo audio samples to mono by averaging the channels.
+/// # Arguments:
+/// - `data`: Input audio samples in i16 format.
+/// - `channels`: Number of channels in the input audio (1 for mono, 2 for stereo).
+/// # Returns:
+/// - `Vec<i16>`: Mono audio samples in i16 format.
 pub fn convert_to_mono(data: &[i16], channels: u32) -> Vec<i16> {
     if channels == 1 {
         data.to_vec()
