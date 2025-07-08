@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 fn main() {
     let onnx_dir = PathBuf::from("onnx");
-
     let onnx_model_path = onnx_dir.join("ten-vad.onnx");
 
     // Get the target directory (e.g., target/debug or target/release)
