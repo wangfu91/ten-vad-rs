@@ -157,7 +157,7 @@ mod tests {
         // Test with longer input to get more predictable upsampling behavior
         let samples = vec![100i16; 1000];
         let result = resampling(&samples, 8000, 16000);
-        
+
         // Should succeed
         assert!(result.is_ok(), "Upsampling should succeed");
         // This test mainly verifies that upsampling doesn't crash or error
@@ -191,15 +191,18 @@ mod tests {
     #[test]
     fn test_resampling_common_rates() {
         let samples = vec![100i16, -200, 300, -400, 500];
-        
+
         // Test common sample rate conversions
         let rates = vec![8000, 16000, 22050, 44100, 48000];
-        
+
         for &input_rate in &rates {
             for &output_rate in &rates {
                 let result = resampling(&samples, input_rate, output_rate);
-                assert!(result.is_ok(), "Failed to resample from {input_rate} to {output_rate}");
-                
+                assert!(
+                    result.is_ok(),
+                    "Failed to resample from {input_rate} to {output_rate}"
+                );
+
                 if input_rate == output_rate {
                     assert_eq!(result.unwrap(), samples);
                 }
@@ -213,16 +216,22 @@ mod tests {
         let samples: Vec<i16> = (0..1000)
             .map(|i| ((i as f32 * 0.01).sin() * 1000.0) as i16)
             .collect();
-        
+
         let result = resampling(&samples, 16000, 32000).unwrap();
-        
+
         // Basic sanity checks - longer input should produce output
-        assert!(!result.is_empty() || samples.is_empty(), "Non-empty input should produce output");
-        
+        assert!(
+            !result.is_empty() || samples.is_empty(),
+            "Non-empty input should produce output"
+        );
+
         if !result.is_empty() {
             // Check that values are within reasonable bounds (not clipped to extremes)
             let has_extreme_values = result.iter().any(|&x| x == i16::MAX || x == i16::MIN);
-            assert!(!has_extreme_values, "Resampling should not produce extreme clipping");
+            assert!(
+                !has_extreme_values,
+                "Resampling should not produce extreme clipping"
+            );
         }
     }
 
@@ -230,7 +239,7 @@ mod tests {
     fn test_resampling_with_silence() {
         let silence = vec![0i16; 1000];
         let result = resampling(&silence, 44100, 16000).unwrap();
-        
+
         // Resampled silence should still be silence
         assert!(result.iter().all(|&x| x.abs() < 10)); // Allow for tiny rounding errors
     }
@@ -238,11 +247,11 @@ mod tests {
     #[test]
     fn test_resampling_extreme_ratios() {
         let samples = vec![1000i16, -1000, 1000, -1000];
-        
+
         // Test extreme downsampling
         let result = resampling(&samples, 48000, 8000);
         assert!(result.is_ok());
-        
+
         // Test extreme upsampling
         let result = resampling(&samples, 8000, 48000);
         assert!(result.is_ok());

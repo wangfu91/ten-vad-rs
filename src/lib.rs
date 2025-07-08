@@ -381,49 +381,55 @@ mod tests {
     #[test]
     fn test_generate_mel_filters() {
         let mel_filters = TenVad::generate_mel_filters();
-        
+
         // Check dimensions
         assert_eq!(
             mel_filters.shape(),
             &[MEL_FILTER_BANK_NUM, FFT_SIZE / 2 + 1]
         );
-        
+
         // Check that filters are non-negative
         assert!(mel_filters.iter().all(|&x| x >= 0.0));
-        
+
         // Check that each filter has some non-zero values
         for i in 0..MEL_FILTER_BANK_NUM {
             let filter_sum: f32 = mel_filters.row(i).sum();
             assert!(filter_sum > 0.0, "Filter {i} should have non-zero values");
         }
-        
+
         // Check that filters have triangular shape (max value should be around 1.0)
         for i in 0..MEL_FILTER_BANK_NUM {
             let max_val = mel_filters.row(i).iter().fold(0.0f32, |a, &b| a.max(b));
-            assert!(max_val <= 1.0 + f32::EPSILON, "Filter {i} max value should not exceed 1.0");
+            assert!(
+                max_val <= 1.0 + f32::EPSILON,
+                "Filter {i} max value should not exceed 1.0"
+            );
         }
     }
 
     #[test]
     fn test_generate_hann_window() {
         let window = TenVad::generate_hann_window();
-        
+
         // Check length
         assert_eq!(window.len(), WINDOW_SIZE);
-        
+
         // Check range [0, 1]
         assert!(window.iter().all(|&x| (0.0..=1.0).contains(&x)));
-        
+
         // Check symmetry
         for i in 0..WINDOW_SIZE / 2 {
             let diff = (window[i] - window[WINDOW_SIZE - 1 - i]).abs();
             assert!(diff < 1e-6, "Window should be symmetric");
         }
-        
+
         // Check that window starts and ends near zero
         assert!(window[0] < 0.01, "Window should start near zero");
-        assert!(window[WINDOW_SIZE - 1] < 0.01, "Window should end near zero");
-        
+        assert!(
+            window[WINDOW_SIZE - 1] < 0.01,
+            "Window should end near zero"
+        );
+
         // Check that window peaks near the middle
         let mid_idx = WINDOW_SIZE / 2;
         assert!(window[mid_idx] > 0.9, "Window should peak near the middle");
@@ -434,12 +440,12 @@ mod tests {
         let mut vad = create_test_vad();
         let audio_frame = vec![0.0, 1.0, 2.0, 3.0, 4.0];
         let emphasized = vad.pre_emphasis(&audio_frame);
-        
+
         assert_eq!(emphasized.len(), audio_frame.len());
-        
+
         // First sample should be original (no previous sample)
         assert_eq!(emphasized[0], audio_frame[0]);
-        
+
         // Check that pre-emphasis is applied correctly
         for i in 1..audio_frame.len() {
             let expected = audio_frame[i] - PRE_EMPHASIS_COEFF * audio_frame[i - 1];
@@ -450,15 +456,15 @@ mod tests {
     #[test]
     fn test_pre_emphasis_state_preservation() {
         let mut vad = create_test_vad();
-        
+
         // Process first frame
         let frame1 = vec![1.0, 2.0, 3.0];
         let _ = vad.pre_emphasis(&frame1);
-        
+
         // Process second frame - should use last value from frame1 as previous
         let frame2 = vec![4.0, 5.0, 6.0];
         let emphasized2 = vad.pre_emphasis(&frame2);
-        
+
         // First sample of frame2 should use last sample of frame1
         let expected = frame2[0] - PRE_EMPHASIS_COEFF * frame1[frame1.len() - 1];
         assert!((emphasized2[0] - expected).abs() < f32::EPSILON);
@@ -477,7 +483,7 @@ mod tests {
         let mut vad = create_test_vad();
         let single_frame = vec![5.0];
         let emphasized = vad.pre_emphasis(&single_frame);
-        
+
         assert_eq!(emphasized.len(), 1);
         // With no previous sample (initial state), should be close to original
         assert!((emphasized[0] - single_frame[0]).abs() < f32::EPSILON);
@@ -488,9 +494,9 @@ mod tests {
         let mut vad = create_test_vad();
         let audio_frame = vec![0.0; WINDOW_SIZE];
         let features = vad.extract_features(&audio_frame);
-        
+
         assert_eq!(features.len(), FEATURE_LEN);
-        
+
         // All features should be finite numbers
         assert!(features.iter().all(|&x| x.is_finite()));
     }
@@ -500,18 +506,22 @@ mod tests {
         let mut vad = create_test_vad();
         let audio_frame = generate_test_audio(WINDOW_SIZE, 440.0, 16000.0);
         let features = vad.extract_features(&audio_frame);
-        
+
         assert_eq!(features.len(), FEATURE_LEN);
         assert!(features.iter().all(|&x| x.is_finite()));
-        
+
         // For a sine wave, features should be different from silence
         let silence_features = vad.extract_features(&vec![0.0; WINDOW_SIZE]);
-        let features_diff: f32 = features.iter()
+        let features_diff: f32 = features
+            .iter()
             .zip(silence_features.iter())
             .map(|(a, b)| (a - b).abs())
             .sum();
-        
-        assert!(features_diff > 0.1, "Sine wave features should be different from silence");
+
+        assert!(
+            features_diff > 0.1,
+            "Sine wave features should be different from silence"
+        );
     }
 
     #[test]
@@ -519,7 +529,7 @@ mod tests {
         let mut vad = create_test_vad();
         let short_frame = vec![1.0; 100]; // Shorter than WINDOW_SIZE
         let features = vad.extract_features(&short_frame);
-        
+
         assert_eq!(features.len(), FEATURE_LEN);
         assert!(features.iter().all(|&x| x.is_finite()));
     }
@@ -529,7 +539,7 @@ mod tests {
         let mut vad = create_test_vad();
         let long_frame = vec![1.0; WINDOW_SIZE * 2]; // Longer than WINDOW_SIZE
         let features = vad.extract_features(&long_frame);
-        
+
         assert_eq!(features.len(), FEATURE_LEN);
         assert!(features.iter().all(|&x| x.is_finite()));
     }
@@ -539,18 +549,27 @@ mod tests {
         let mut vad = create_test_vad();
         let audio_frame = generate_test_audio(WINDOW_SIZE, 1000.0, 16000.0);
         let features = vad.extract_features(&audio_frame);
-        
+
         // Features should be normalized - check basic properties
-        assert!(features.iter().all(|&x| x.is_finite()), "All features should be finite");
-        
+        assert!(
+            features.iter().all(|&x| x.is_finite()),
+            "All features should be finite"
+        );
+
         // Check that features are not all identical (indicating processing worked)
         let first_feature = features[0];
         let has_variation = features.iter().any(|&x| (x - first_feature).abs() > 0.01);
-        assert!(has_variation, "Features should show variation after processing");
-        
+        assert!(
+            has_variation,
+            "Features should show variation after processing"
+        );
+
         // Check that features have reasonable magnitude (normalized features typically in [-5, 5] range)
         let max_abs = features.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
-        assert!(max_abs < 10.0, "Normalized features should have reasonable magnitude");
+        assert!(
+            max_abs < 10.0,
+            "Normalized features should have reasonable magnitude"
+        );
     }
 
     #[test]
@@ -558,22 +577,32 @@ mod tests {
         // Test that initialization works
         let vad = TenVad::new("onnx/ten-vad.onnx");
         assert!(vad.is_ok(), "TenVad initialization should succeed");
-        
+
         let vad = vad.unwrap();
-        
+
         // Check initial states
         assert_eq!(vad.hidden_states.len(), MODEL_IO_NUM - 1);
         for (i, hidden_state) in vad.hidden_states.iter().enumerate() {
-            assert_eq!(hidden_state.shape(), &[1, MODEL_HIDDEN_DIM], 
-                      "Hidden state {i} should have correct shape");
-            assert!(hidden_state.iter().all(|&x| x == 0.0), 
-                   "Hidden state {i} should be initialized to zero");
+            assert_eq!(
+                hidden_state.shape(),
+                &[1, MODEL_HIDDEN_DIM],
+                "Hidden state {i} should have correct shape"
+            );
+            assert!(
+                hidden_state.iter().all(|&x| x == 0.0),
+                "Hidden state {i} should be initialized to zero"
+            );
         }
-        
-        assert_eq!(vad.feature_buffer.shape(), &[CONTEXT_WINDOW_LEN, FEATURE_LEN]);
-        assert!(vad.feature_buffer.iter().all(|&x| x == 0.0), 
-               "Feature buffer should be initialized to zero");
-        
+
+        assert_eq!(
+            vad.feature_buffer.shape(),
+            &[CONTEXT_WINDOW_LEN, FEATURE_LEN]
+        );
+        assert!(
+            vad.feature_buffer.iter().all(|&x| x == 0.0),
+            "Feature buffer should be initialized to zero"
+        );
+
         assert_eq!(vad.pre_emphasis_prev, 0.0);
     }
 
@@ -586,26 +615,32 @@ mod tests {
     #[test]
     fn test_reset_vad_state() {
         let mut vad = create_test_vad();
-        
+
         // Process some audio to change internal state
         let audio_frame = generate_test_audio(256, 440.0, 16000.0);
         let audio_i16: Vec<i16> = audio_frame.iter().map(|&x| (x * 32767.0) as i16).collect();
         let _ = vad.process_frame(&audio_i16);
-        
+
         // Reset the VAD
         vad.reset();
-        
+
         // Check that states are reset
         for hidden_state in &vad.hidden_states {
-            assert!(hidden_state.iter().all(|&x| x == 0.0), 
-                   "Hidden states should be reset to zero");
+            assert!(
+                hidden_state.iter().all(|&x| x == 0.0),
+                "Hidden states should be reset to zero"
+            );
         }
-        
-        assert!(vad.feature_buffer.iter().all(|&x| x == 0.0), 
-               "Feature buffer should be reset to zero");
-        
-        assert_eq!(vad.pre_emphasis_prev, 0.0, 
-                  "Pre-emphasis state should be reset");
+
+        assert!(
+            vad.feature_buffer.iter().all(|&x| x == 0.0),
+            "Feature buffer should be reset to zero"
+        );
+
+        assert_eq!(
+            vad.pre_emphasis_prev, 0.0,
+            "Pre-emphasis state should be reset"
+        );
     }
 
     #[test]
@@ -613,11 +648,14 @@ mod tests {
         let mut vad = create_test_vad();
         let audio_frame = vec![0i16; 256];
         let result = vad.process_frame(&audio_frame);
-        
+
         assert!(result.is_ok(), "Processing frame should succeed");
         let vad_score = result.unwrap();
         assert!(vad_score.is_finite(), "VAD score should be finite");
-        assert!((0.0..=1.0).contains(&vad_score), "VAD score should be in [0, 1] range");
+        assert!(
+            (0.0..=1.0).contains(&vad_score),
+            "VAD score should be in [0, 1] range"
+        );
     }
 
     #[test]
@@ -625,31 +663,34 @@ mod tests {
         let mut vad = create_test_vad();
         let empty_frame: Vec<i16> = vec![];
         let result = vad.process_frame(&empty_frame);
-        
+
         assert!(result.is_ok(), "Processing empty frame should succeed");
     }
 
     #[test]
     fn test_process_frame_different_sizes() {
         let mut vad = create_test_vad();
-        
+
         let sizes = vec![64, 128, 256, 512, 1024];
         for size in sizes {
             let audio_frame = vec![100i16; size];
             let result = vad.process_frame(&audio_frame);
-            assert!(result.is_ok(), "Processing frame of size {size} should succeed");
+            assert!(
+                result.is_ok(),
+                "Processing frame of size {size} should succeed"
+            );
         }
     }
 
     #[test]
     fn test_process_frame_extreme_values() {
         let mut vad = create_test_vad();
-        
+
         // Test with maximum values
         let max_frame = vec![i16::MAX; 256];
         let result = vad.process_frame(&max_frame);
         assert!(result.is_ok(), "Processing max values should succeed");
-        
+
         // Test with minimum values
         let min_frame = vec![i16::MIN; 256];
         let result = vad.process_frame(&min_frame);
@@ -660,13 +701,15 @@ mod tests {
     fn test_process_frame_sequence() {
         let mut vad = create_test_vad();
         let frame_size = 256;
-        
+
         // Process multiple frames in sequence
         for i in 0..10 {
-            let audio_frame: Vec<i16> = (0..frame_size).map(|j| ((i * 100 + j) % 1000) as i16).collect();
+            let audio_frame: Vec<i16> = (0..frame_size)
+                .map(|j| ((i * 100 + j) % 1000) as i16)
+                .collect();
             let result = vad.process_frame(&audio_frame);
             assert!(result.is_ok(), "Processing frame {i} should succeed");
-            
+
             let vad_score = result.unwrap();
             assert!(vad_score.is_finite(), "VAD score {i} should be finite");
         }
@@ -676,58 +719,68 @@ mod tests {
     fn test_process_frame_consistent_results() {
         let mut vad1 = create_test_vad();
         let mut vad2 = create_test_vad();
-        
+
         let audio_frame = generate_test_audio(256, 440.0, 16000.0);
         let audio_i16: Vec<i16> = audio_frame.iter().map(|&x| (x * 32767.0) as i16).collect();
-        
+
         let score1 = vad1.process_frame(&audio_i16).unwrap();
         let score2 = vad2.process_frame(&audio_i16).unwrap();
-        
-        assert!((score1 - score2).abs() < f32::EPSILON, 
-               "Same input should produce same output");
+
+        assert!(
+            (score1 - score2).abs() < f32::EPSILON,
+            "Same input should produce same output"
+        );
     }
 
     #[test]
     fn test_feature_buffer_sliding_window() {
         let mut vad = create_test_vad();
-        
+
         // Feature buffer should initially be zeros
         let initial_sum: f32 = vad.feature_buffer.sum();
         assert_eq!(initial_sum, 0.0, "Initial feature buffer should be zeros");
-        
+
         // Process several frames with different signals
         for i in 0..CONTEXT_WINDOW_LEN + 2 {
             // Create audio with some variation to ensure features are different
             let audio_frame = generate_test_audio(WINDOW_SIZE, 200.0 + i as f32 * 100.0, 16000.0);
             let _ = vad.extract_features(&audio_frame);
         }
-        
+
         // Feature buffer should contain the last CONTEXT_WINDOW_LEN frames
-        assert_eq!(vad.feature_buffer.shape(), &[CONTEXT_WINDOW_LEN, FEATURE_LEN]);
-        
+        assert_eq!(
+            vad.feature_buffer.shape(),
+            &[CONTEXT_WINDOW_LEN, FEATURE_LEN]
+        );
+
         // The buffer should have been updated from its initial zero state
         // Even after normalization, processed audio should produce different features than silence
         let silence_features = {
             let mut temp_vad = create_test_vad();
             temp_vad.extract_features(&vec![0.0; WINDOW_SIZE])
         };
-        
+
         // At least one row should be different from silence features
         let mut has_difference = false;
         for row_idx in 0..CONTEXT_WINDOW_LEN {
             let row = vad.feature_buffer.row(row_idx);
-            let diff: f32 = row.iter().zip(silence_features.iter())
+            let diff: f32 = row
+                .iter()
+                .zip(silence_features.iter())
                 .map(|(a, b)| (a - b).abs())
                 .sum();
-            if diff > 0.1 {  // Allow for some tolerance
+            if diff > 0.1 {
+                // Allow for some tolerance
                 has_difference = true;
                 break;
             }
         }
-        
+
         // If no significant difference found, at least verify the buffer structure is correct
-        assert!(has_difference || vad.feature_buffer.shape() == [CONTEXT_WINDOW_LEN, FEATURE_LEN], 
-               "Feature buffer should either show processing changes or maintain correct structure");
+        assert!(
+            has_difference || vad.feature_buffer.shape() == [CONTEXT_WINDOW_LEN, FEATURE_LEN],
+            "Feature buffer should either show processing changes or maintain correct structure"
+        );
     }
 
     #[test]
@@ -735,29 +788,52 @@ mod tests {
         // Test that constants are reasonable (these help document expected values)
         const _: () = assert!(FFT_SIZE > 0, "FFT_SIZE should be positive");
         const _: () = assert!(WINDOW_SIZE > 0, "WINDOW_SIZE should be positive");
-        const _: () = assert!(MEL_FILTER_BANK_NUM > 0, "MEL_FILTER_BANK_NUM should be positive");
+        const _: () = assert!(
+            MEL_FILTER_BANK_NUM > 0,
+            "MEL_FILTER_BANK_NUM should be positive"
+        );
         const _: () = assert!(FEATURE_LEN > 0, "FEATURE_LEN should be positive");
-        const _: () = assert!(CONTEXT_WINDOW_LEN > 0, "CONTEXT_WINDOW_LEN should be positive");
+        const _: () = assert!(
+            CONTEXT_WINDOW_LEN > 0,
+            "CONTEXT_WINDOW_LEN should be positive"
+        );
         const _: () = assert!(MODEL_HIDDEN_DIM > 0, "MODEL_HIDDEN_DIM should be positive");
         const _: () = assert!(MODEL_IO_NUM > 1, "MODEL_IO_NUM should be greater than 1");
-        
+
         // Test runtime checks
-        assert!(FFT_SIZE.is_power_of_two(), "FFT_SIZE should be a power of 2");
-        assert!((0.0..1.0).contains(&PRE_EMPHASIS_COEFF), "PRE_EMPHASIS_COEFF should be in (0,1)");
-        
+        assert!(
+            FFT_SIZE.is_power_of_two(),
+            "FFT_SIZE should be a power of 2"
+        );
+        assert!(
+            (0.0..1.0).contains(&PRE_EMPHASIS_COEFF),
+            "PRE_EMPHASIS_COEFF should be in (0,1)"
+        );
+
         // Test feature normalization constants
-        assert_eq!(FEATURE_MEANS.len(), FEATURE_LEN, "FEATURE_MEANS length should match FEATURE_LEN");
-        assert_eq!(FEATURE_STDS.len(), FEATURE_LEN, "FEATURE_STDS length should match FEATURE_LEN");
-        
+        assert_eq!(
+            FEATURE_MEANS.len(),
+            FEATURE_LEN,
+            "FEATURE_MEANS length should match FEATURE_LEN"
+        );
+        assert_eq!(
+            FEATURE_STDS.len(),
+            FEATURE_LEN,
+            "FEATURE_STDS length should match FEATURE_LEN"
+        );
+
         // All standard deviations should be positive
-        assert!(FEATURE_STDS.iter().all(|&x| x > 0.0), "All feature stds should be positive");
+        assert!(
+            FEATURE_STDS.iter().all(|&x| x > 0.0),
+            "All feature stds should be positive"
+        );
     }
 
     #[test]
     fn test_debug_implementation() {
         let vad = create_test_vad();
         let debug_str = format!("{vad:?}");
-        
+
         // Debug output should contain key information
         assert!(debug_str.contains("TenVadOnnx"));
         assert!(debug_str.contains("hidden_states"));
@@ -769,23 +845,25 @@ mod tests {
         // Test that multiple VAD instances can coexist
         let mut vad1 = create_test_vad();
         let mut vad2 = create_test_vad();
-        
+
         let frame1 = vec![100i16; 256];
         let frame2 = vec![200i16; 256];
-        
+
         let score1 = vad1.process_frame(&frame1).unwrap();
         let score2 = vad2.process_frame(&frame2).unwrap();
-        
+
         // Different inputs should potentially produce different outputs
         assert!(score1.is_finite() && score2.is_finite());
-        
+
         // Process same frame with both instances
         let same_frame = vec![150i16; 256];
         let score1_same = vad1.process_frame(&same_frame).unwrap();
         let score2_same = vad2.process_frame(&same_frame).unwrap();
-        
+
         // Should produce same result for same input
-        assert!((score1_same - score2_same).abs() < 0.01, 
-               "Different instances should produce similar results for same input");
+        assert!(
+            (score1_same - score2_same).abs() < 0.01,
+            "Different instances should produce similar results for same input"
+        );
     }
 }
