@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use ten_vad_rs::{AudioSegment, utils};
+use ten_vad_rs::{AudioSegment, TenVad, utils};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
 const THRESHOLD: f32 = 0.5; // Default threshold for VAD
@@ -8,16 +8,7 @@ const TARGET_SAMPLE_RATE: u32 = 16000; // Target sample rate for VAD (16kHz)
 fn main() -> anyhow::Result<()> {
     println!("TenVAD Microphone Example");
 
-    // Example usage of TenVAD with a microphone input
-    use ten_vad_rs::TenVAD;
-
-    let vad = TenVAD::new(HOP_SIZE, THRESHOLD)?;
-    println!("TenVAD Version: {}", TenVAD::get_version());
-    println!(
-        "Using hop size: {}, threshold: {}",
-        vad.hop_size(),
-        vad.threshold()
-    );
+    let mut vad = TenVad::new("onnx/ten-vad.onnx")?;
 
     let host = cpal::default_host();
     let input_device = host
@@ -46,12 +37,11 @@ fn main() -> anyhow::Result<()> {
             while let Some(frame) = audio_segment.get_fixed_size_samples() {
                 // Process each frame of audio data
                 match vad.process_frame(&frame) {
-                    Ok(result) => {
-                        if result.is_voice {
-                            println!(
-                                "++++++ Detected voice in frame: probability {}",
-                                result.probability,
-                            );
+                    Ok(vad_score) => {
+                        if vad_score >= THRESHOLD {
+                            println!("++++++ Detected voice in frame: probability {vad_score:2}");
+                        } else {
+                            println!("------ No voice detected in frame");
                         }
                     }
                     Err(e) => eprintln!("Error processing frame: {e}"),

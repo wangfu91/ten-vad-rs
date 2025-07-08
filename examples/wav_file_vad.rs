@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use std::env;
 use std::fs::File;
 use std::io::BufReader;
-use ten_vad_rs::{AudioSegment, TenVAD, utils};
+use ten_vad_rs::{AudioSegment, TenVad, utils};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
 const THRESHOLD: f32 = 0.5; // Default threshold for VAD
@@ -10,7 +10,7 @@ const TARGET_SAMPLE_RATE: u32 = 16000; // Target sample rate for VAD (16kHz)
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 2 {
+    if args.len() <= 2 {
         eprintln!("Usage: {} <wav_file_path>", args[0]);
         eprintln!("Example: {} input.wav", args[0]);
         std::process::exit(1);
@@ -18,24 +18,15 @@ fn main() -> anyhow::Result<()> {
 
     let wav_file_path = &args[1];
 
-    // Create TenVAD instance with optimal settings
-    // Using 256 samples (16ms) hop size as recommended for 16kHz
-    let vad = TenVAD::new(HOP_SIZE, THRESHOLD)?;
-
-    println!("TenVAD Version: {}", TenVAD::get_version());
-    println!("Processing WAV file: {wav_file_path}");
-    println!(
-        "VAD Settings: hop_size={}, threshold={}",
-        vad.hop_size(),
-        vad.threshold()
-    );
-
-    process_wav_file(wav_file_path, &vad)?;
+    let mut vad = TenVad::new("onnx/ten-vad.onnx")?;
+    process_wav_file(wav_file_path, &mut vad)?;
 
     Ok(())
 }
 
-fn process_wav_file(wav_file_path: &str, vad: &TenVAD) -> anyhow::Result<()> {
+fn process_wav_file(wav_file_path: &str, vad: &mut TenVad) -> anyhow::Result<()> {
+    println!("Processing WAV file: {wav_file_path}");
+
     let file = File::open(wav_file_path)?;
     let mut reader = hound::WavReader::new(BufReader::new(file))?;
 
@@ -65,12 +56,9 @@ fn process_wav_file(wav_file_path: &str, vad: &TenVAD) -> anyhow::Result<()> {
 
     while let Some(frame) = audio_segment.get_fixed_size_samples() {
         match vad.process_frame(&frame) {
-            Ok(result) => {
-                if result.is_voice {
-                    println!(
-                        "++++++ Detected voice in frame: probability {}",
-                        result.probability,
-                    );
+            Ok(vad_score) => {
+                if vad_score >= THRESHOLD {
+                    println!("++++++ Detected voice in frame: probability {vad_score:2}");
                 } else {
                     println!("------ No voice detected in frame");
                 }

@@ -1,473 +1,394 @@
-use crate::bindings::{
-    ten_vad_create, ten_vad_destroy, ten_vad_get_version, ten_vad_handle_t, ten_vad_process,
-};
+#![allow(clippy::excessive_precision)]
+
+mod audio_segment;
+mod error;
+pub mod utils;
 
 // Re-export error types for public API
 pub use crate::audio_segment::AudioSegment;
 pub use crate::error::{TenVadError, TenVadResult};
 
-#[allow(non_camel_case_types)]
-#[allow(non_snake_case)]
-#[allow(non_upper_case_globals)]
-#[allow(dead_code)]
-mod bindings {
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-}
-mod audio_segment;
-mod error;
-pub mod onnx;
-pub mod utils;
+use ndarray::{Array1, Array2, Axis};
+use ort::session::builder::GraphOptimizationLevel;
+use ort::session::{SessionInputValue, SessionInputs};
+use ort::{session::Session, value::TensorRef};
+use rustfft::{Fft, FftPlanner, num_complex::Complex32};
+use std::{f32::consts::PI, sync::Arc};
 
-/// Result of VAD processing for a single frame
-#[derive(Debug, Clone, PartialEq)]
-pub struct VadResult {
-    /// Voice activity probability in the range [0.0, 1.0]
-    pub probability: f32,
-    /// Binary voice activity decision (true: voice detected, false: no voice)
-    pub is_voice: bool,
+const FFT_SIZE: usize = 1024;
+const WINDOW_SIZE: usize = 768;
+const MEL_FILTER_BANK_NUM: usize = 40;
+const FEATURE_LEN: usize = MEL_FILTER_BANK_NUM + 1; // 40 mel features + 1 pitch feature
+const CONTEXT_WINDOW_LEN: usize = 3;
+const MODEL_HIDDEN_DIM: usize = 64;
+const MODEL_IO_NUM: usize = 5;
+const EPS: f32 = 1e-20;
+const PRE_EMPHASIS_COEFF: f32 = 0.97;
+
+/// Means of input-mel-filterbank (from coeff.h)
+#[rustfmt::skip]
+pub const FEATURE_MEANS: [f32; 41] = [
+    -8.198236465454e+00, -6.265716552734e+00, -5.483818531036e+00,
+    -4.758691310883e+00, -4.417088985443e+00, -4.142892837524e+00,
+    -3.912850379944e+00, -3.845927953720e+00, -3.657090425491e+00,
+    -3.723418712616e+00, -3.876134157181e+00, -3.843890905380e+00,
+    -3.690405130386e+00, -3.756065845490e+00, -3.698696136475e+00,
+    -3.650463104248e+00, -3.700468778610e+00, -3.567321300507e+00,
+    -3.498900175095e+00, -3.477807044983e+00, -3.458816051483e+00,
+    -3.444923877716e+00, -3.401328563690e+00, -3.306261301041e+00,
+    -3.278556823730e+00, -3.233250856400e+00, -3.198616027832e+00,
+    -3.204526424408e+00, -3.208798646927e+00, -3.257838010788e+00,
+    -3.381376743317e+00, -3.534021377563e+00, -3.640867948532e+00,
+    -3.726858854294e+00, -3.773730993271e+00, -3.804667234421e+00,
+    -3.832901000977e+00, -3.871120452881e+00, -3.990592956543e+00,
+    -4.480289459229e+00, 9.235690307617e+01
+];
+
+/// Stds of input-mel-filterbank (from coeff.h)
+#[rustfmt::skip]
+pub const FEATURE_STDS: [f32; 41] = [
+    5.166063785553e+00, 4.977209568024e+00, 4.698895931244e+00,
+    4.630621433258e+00, 4.634347915649e+00, 4.641156196594e+00,
+    4.640676498413e+00, 4.666367053986e+00, 4.650534629822e+00,
+    4.640020847321e+00, 4.637400150299e+00, 4.620099067688e+00,
+    4.596316337585e+00, 4.562654972076e+00, 4.554360389709e+00,
+    4.566910743713e+00, 4.562489986420e+00, 4.562412738800e+00,
+    4.585299491882e+00, 4.600179672241e+00, 4.592845916748e+00,
+    4.585922718048e+00, 4.583496570587e+00, 4.626092910767e+00,
+    4.626957893372e+00, 4.626289367676e+00, 4.637005805969e+00,
+    4.683015823364e+00, 4.726813793182e+00, 4.734289646149e+00,
+    4.753227233887e+00, 4.849722862244e+00, 4.869434833527e+00,
+    4.884482860565e+00, 4.921327114105e+00, 4.959212303162e+00,
+    4.996619224548e+00, 5.044823646545e+00, 5.072216987610e+00,
+    5.096439361572e+00, 1.152136917114e+02
+];
+
+pub struct TenVad {
+    session: Session,                // ONNX session for inference
+    hidden_states: Vec<Array2<f32>>, // Vector of 2D arrays: [MODEL_IO_NUM - 1] each [1, MODEL_HIDDEN_DIM]
+    feature_buffer: Array2<f32>,     // 2D array: [CONTEXT_WINDOW_LEN, FEATURE_LEN]
+    pre_emphasis_prev: f32,          // Previous value for pre-emphasis filtering
+    mel_filters: Array2<f32>,        // 2D array: [MEL_FILTER_BANK_NUM, n_bins]
+    window: Array1<f32>,             // 1D array: [WINDOW_SIZE]
+    fft_instance: Arc<dyn Fft<f32>>, // Cached FFT instance
+    fft_buffer: Vec<Complex32>,      // Reusable FFT buffer
 }
 
-/// Ten VAD (Voice Activity Detection) wrapper
-#[derive(Debug)]
-pub struct TenVAD {
-    ten_vad_handle: ten_vad_handle_t,
-    hop_size: usize,
-    threshold: f32,
-}
-
-impl TenVAD {
-    /// Create a new TenVAD instance
-    ///
+impl TenVad {
+    /// Create a new TenVadOnnx instance with the specified ONNX model path and VAD threshold.
     /// # Arguments
-    /// * `hop_size` - The number of samples between the start points of two consecutive analysis frames (e.g., 256)
-    /// * `threshold` - VAD detection threshold ranging from [0.0, 1.0]. When probability >= threshold, voice is detected.
-    ///
+    /// * `onnx_model_path` - Path to the ONNX model file.
     /// # Returns
-    /// Returns `Ok(TenVAD)` on success, or `Err(TenVadError)` on failure.
-    pub fn new(hop_size: usize, threshold: f32) -> TenVadResult<Self> {
-        if !(0.0..=1.0).contains(&threshold) {
-            return Err(TenVadError::InvalidThreshold(threshold));
+    /// * A `TenVadResult` containing the initialized `TenVadOnnx` instance or an error.
+    pub fn new(onnx_model_path: &str) -> TenVadResult<Self> {
+        // Create ONNX session
+        let session = Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(1)?
+            .with_inter_threads(1)?
+            .commit_from_file(onnx_model_path)?;
+
+        // Initialize hidden states: Vector of 2D arrays [MODEL_IO_NUM - 1] each [1, MODEL_HIDDEN_DIM]
+        let mut hidden_states = Vec::new();
+        for _ in 0..MODEL_IO_NUM - 1 {
+            hidden_states.push(Array2::zeros((1, MODEL_HIDDEN_DIM)));
         }
 
-        if hop_size == 0 {
-            return Err(TenVadError::InvalidHopSize(hop_size));
-        }
+        // Initialize feature buffer: 2D array [CONTEXT_WINDOW_LEN, FEATURE_LEN]
+        let feature_buffer = Array2::zeros((CONTEXT_WINDOW_LEN, FEATURE_LEN));
 
-        let mut ten_vad_handle: ten_vad_handle_t = std::ptr::null_mut();
-        let result = unsafe { ten_vad_create(&mut ten_vad_handle, hop_size, threshold) };
-        if result != 0 {
-            return Err(TenVadError::NativeError(result));
-        }
+        // Initialize pre-emphasis previous value
+        let pre_emphasis_prev = 0.0f32;
 
-        if ten_vad_handle.is_null() {
-            return Err(TenVadError::AllocationError);
-        }
+        // Generate mel filter bank
+        let mel_filters = Self::generate_mel_filters();
 
-        Ok(TenVAD {
-            ten_vad_handle,
-            hop_size,
-            threshold,
+        // Generate Hann window
+        let window = Self::generate_hann_window();
+
+        // Create and cache FFT planner and instance
+        let mut fft_planner = FftPlanner::new();
+        let fft_instance = fft_planner.plan_fft_forward(FFT_SIZE);
+        let fft_buffer = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
+
+        log::debug!("Loaded ONNX model: {onnx_model_path}");
+
+        Ok(Self {
+            session,
+            hidden_states,
+            feature_buffer,
+            pre_emphasis_prev,
+            mel_filters,
+            window,
+            fft_instance,
+            fft_buffer,
         })
     }
 
-    /// Process a single frame of audio data
+    /// Generate mel filter-bank coefficients(Adapted from aed.cc).
     ///
-    /// # Arguments
-    /// * `audio_data` - Audio samples as i16 PCM data. Length must equal hop_size.
-    ///
-    /// # Returns
-    /// Returns `Ok(VadResult)` with probability and voice detection result, or `Err(TenVadError)` on failure.
-    pub fn process_frame(&self, audio_data: &[i16]) -> TenVadResult<VadResult> {
-        if audio_data.len() != self.hop_size {
-            return Err(TenVadError::AudioSizeMismatch {
-                expected: self.hop_size,
-                actual: audio_data.len(),
-            });
+    /// A mel filter bank is a set of filters used in audio processing to mimic the human ear's perception of sound frequencies.
+    /// These filters are spaced according to the mel scale, which is more sensitive to lower frequencies and less sensitive to higher frequencies.
+    fn generate_mel_filters() -> Array2<f32> {
+        let n_bins = FFT_SIZE / 2 + 1;
+
+        // Generate mel frequency points
+        let low_mel = 2595.0f32 * (1.0f32 + 0.0f32 / 700.0f32).log10();
+        let high_mel = 2595.0f32 * (1.0f32 + 8000.0f32 / 700.0f32).log10();
+
+        // Create mel points
+        let mut mel_points = Vec::new();
+        for i in 0..=MEL_FILTER_BANK_NUM + 1 {
+            let mel = low_mel + (high_mel - low_mel) * i as f32 / (MEL_FILTER_BANK_NUM + 1) as f32;
+            mel_points.push(mel);
         }
 
-        let mut out_probability: f32 = 0.0;
-        let mut out_flag: i32 = 0;
-
-        let result = unsafe {
-            ten_vad_process(
-                self.ten_vad_handle,
-                audio_data.as_ptr(),
-                audio_data.len(),
-                &mut out_probability,
-                &mut out_flag,
-            )
-        };
-
-        if result != 0 {
-            return Err(TenVadError::NativeError(result));
+        // Convert to Hz
+        let mut hz_points = Vec::new();
+        for mel in mel_points {
+            let hz = 700.0f32 * (10.0f32.powf(mel / 2595.0f32) - 1.0f32);
+            hz_points.push(hz);
         }
 
-        Ok(VadResult {
-            probability: out_probability,
-            is_voice: out_flag != 0,
-        })
-    }
-
-    /// Process frames with a streaming callback for memory efficiency
-    ///
-    /// # Arguments
-    /// * `audio_data` - Audio samples as i16 PCM data. Length must be a multiple of hop_size.
-    /// * `callback` - Function called for each processed frame with (frame_index, VadResult)
-    ///
-    /// # Returns
-    /// Returns `Ok(())` on success, or `Err(TenVadError)` on failure.
-    pub fn process_frames_streaming<F>(
-        &self,
-        audio_data: &[i16],
-        mut callback: F,
-    ) -> TenVadResult<()>
-    where
-        F: FnMut(usize, VadResult) -> bool, // Return false to stop processing
-    {
-        if audio_data.len() % self.hop_size != 0 {
-            return Err(TenVadError::AudioSizeMismatch {
-                expected: self.hop_size,
-                actual: audio_data.len(),
-            });
+        // Convert to FFT bin indices
+        let mut bin_points = Vec::new();
+        for hz in hz_points {
+            let bin = ((FFT_SIZE + 1) as f32 * hz / 16000.0f32).floor() as usize;
+            bin_points.push(bin);
         }
 
-        let frame_count = audio_data.len() / self.hop_size;
+        // Build mel filter bank as 2D array
+        let mut mel_filters = Array2::zeros((MEL_FILTER_BANK_NUM, n_bins));
 
-        for i in 0..frame_count {
-            let start_idx = i * self.hop_size;
-            let end_idx = start_idx + self.hop_size;
-            let frame_data = &audio_data[start_idx..end_idx];
+        for i in 0..MEL_FILTER_BANK_NUM {
+            // Left slope
+            for j in bin_points[i]..bin_points[i + 1] {
+                if j < n_bins {
+                    mel_filters[[i, j]] =
+                        (j - bin_points[i]) as f32 / (bin_points[i + 1] - bin_points[i]) as f32;
+                }
+            }
 
-            let result = self.process_frame(frame_data)?;
-
-            if !callback(i, result) {
-                break; // Early termination requested
+            // Right slope
+            for j in bin_points[i + 1]..bin_points[i + 2] {
+                if j < n_bins {
+                    mel_filters[[i, j]] = (bin_points[i + 2] - j) as f32
+                        / (bin_points[i + 2] - bin_points[i + 1]) as f32;
+                }
             }
         }
 
-        Ok(())
+        mel_filters
     }
 
-    /// Process frames and return only frames where voice was detected
-    ///
+    /// Generate Hann window coefficients
+    fn generate_hann_window() -> Array1<f32> {
+        let mut window = Array1::zeros(WINDOW_SIZE);
+        for i in 0..WINDOW_SIZE {
+            let value = 0.5 * (1.0 - (2.0 * PI * i as f32 / (WINDOW_SIZE - 1) as f32).cos());
+            window[i] = value;
+        }
+        window
+    }
+
+    /// Pre-emphasis filtering
+    fn pre_emphasis(&mut self, audio_frame: &[f32]) -> Array1<f32> {
+        let mut emphasized = Array1::zeros(audio_frame.len());
+
+        // First sample
+        emphasized[0] = audio_frame[0] - PRE_EMPHASIS_COEFF * self.pre_emphasis_prev;
+
+        // Remaining samples
+        for i in 1..audio_frame.len() {
+            emphasized[i] = audio_frame[i] - PRE_EMPHASIS_COEFF * audio_frame[i - 1];
+        }
+
+        // Update previous value for next call
+        self.pre_emphasis_prev = audio_frame[audio_frame.len() - 1];
+
+        emphasized
+    }
+
+    /// Extract features from audio frame
+    fn extract_features(&mut self, audio_frame: &[f32]) -> Array1<f32> {
+        // Pre-emphasis
+        let emphasized = self.pre_emphasis(audio_frame);
+
+        // Zero-padding to window size
+        let mut padded = Array1::zeros(WINDOW_SIZE);
+        let copy_len = emphasized.len().min(WINDOW_SIZE);
+        padded
+            .slice_mut(ndarray::s![..copy_len])
+            .assign(&emphasized.slice(ndarray::s![..copy_len]));
+
+        // Windowing
+        let windowed = &padded * &self.window;
+
+        // FFT - use cached FFT instance and reusable buffer
+        self.fft_buffer.clear();
+        self.fft_buffer.resize(FFT_SIZE, Complex32::new(0.0, 0.0));
+
+        // Prepare input for FFT (real to complex)
+        for i in 0..WINDOW_SIZE.min(FFT_SIZE) {
+            self.fft_buffer[i] = Complex32::new(windowed[i], 0.0);
+        }
+
+        // Perform FFT using cached instance
+        self.fft_instance.process(&mut self.fft_buffer);
+
+        // Compute power spectrum (only positive frequencies)
+        let n_bins = FFT_SIZE / 2 + 1;
+        let mut power_spectrum = Array1::zeros(n_bins);
+        for i in 0..n_bins {
+            power_spectrum[i] = self.fft_buffer[i].norm_sqr();
+        }
+
+        // Normalization (corresponding to powerNormal = 32768^2 in C++)
+        let power_normal = 32768.0f32.powi(2);
+        power_spectrum /= power_normal;
+
+        // Mel filter bank features
+        let mel_features = self.mel_filters.dot(&power_spectrum);
+        let mel_features = mel_features.mapv(|x| (x + EPS).ln());
+
+        // Simple pitch estimation (using 0 here, actual C++ code has complex pitch estimation)
+        let pitch_freq = 0.0f32;
+
+        // Combine features
+        let mut features = Array1::zeros(FEATURE_LEN);
+        features
+            .slice_mut(ndarray::s![..MEL_FILTER_BANK_NUM])
+            .assign(&mel_features);
+        features[MEL_FILTER_BANK_NUM] = pitch_freq;
+
+        // Feature normalization
+        for i in 0..FEATURE_LEN {
+            features[i] = (features[i] - FEATURE_MEANS[i]) / (FEATURE_STDS[i] + EPS);
+        }
+
+        features
+    }
+
+    /// Process a single audio frame and return VAD score and decision
     /// # Arguments
-    /// * `audio_data` - Audio samples as i16 PCM data. Length must be a multiple of hop_size.
-    ///
+    /// * `audio_frame` - A slice of i16 audio samples (e.g., from a microphone)
     /// # Returns
-    /// Returns `Ok(Vec<(usize, VadResult)>)` with frame indices and results for voice frames only.
-    pub fn process_frames_voice_only(
-        &self,
-        audio_data: &[i16],
-    ) -> TenVadResult<Vec<(usize, VadResult)>> {
-        if audio_data.len() % self.hop_size != 0 {
-            return Err(TenVadError::AudioSizeMismatch {
-                expected: audio_data.len() - (audio_data.len() % self.hop_size),
-                actual: audio_data.len(),
-            });
-        }
+    /// * The VAD score (f32)
+    pub fn process_frame(&mut self, audio_frame: &[i16]) -> TenVadResult<f32> {
+        // Convert i16 to f32
+        let audio_f32: Vec<f32> = audio_frame.iter().map(|&x| x as f32).collect();
 
-        let frame_count = audio_data.len() / self.hop_size;
-        let mut voice_frames = Vec::new();
+        // Extract features
+        let features = self.extract_features(&audio_f32);
 
-        for i in 0..frame_count {
-            let start_idx = i * self.hop_size;
-            let end_idx = start_idx + self.hop_size;
-            let frame_data = &audio_data[start_idx..end_idx];
-
-            let result = self.process_frame(frame_data)?;
-
-            if result.is_voice {
-                voice_frames.push((i, result));
+        // Update feature buffer (sliding window)
+        // Shift existing features up and add new features at the end
+        if CONTEXT_WINDOW_LEN > 1 {
+            // Use a simple loop to shift rows up
+            for i in 0..CONTEXT_WINDOW_LEN - 1 {
+                // Copy row i+1 to row i
+                let src_row = self.feature_buffer.row(i + 1).to_owned();
+                self.feature_buffer.row_mut(i).assign(&src_row);
             }
         }
+        // Set the last row to new features
+        self.feature_buffer
+            .row_mut(CONTEXT_WINDOW_LEN - 1)
+            .assign(&features);
 
-        Ok(voice_frames)
-    }
+        // Prepare ONNX inference input
+        // Reshape feature buffer, [CONTEXT_WINDOW_LEN, FEATURE_LEN] to [1, CONTEXT_WINDOW_LEN, FEATURE_LEN]
+        let input_features = self.feature_buffer.view().insert_axis(Axis(0)); // shape: (1, CONTEXT_WINDOW_LEN, FEATURE_LEN)
 
-    /// Get the hop size used by this VAD instance
-    pub fn hop_size(&self) -> usize {
-        self.hop_size
-    }
+        // Build input array directly
+        let input_tensors: [SessionInputValue; MODEL_IO_NUM] = [
+            // Input features as first input
+            SessionInputValue::from(TensorRef::from_array_view(input_features)?),
+            // Add hidden states as inputs
+            SessionInputValue::from(TensorRef::from_array_view(self.hidden_states[0].view())?),
+            SessionInputValue::from(TensorRef::from_array_view(self.hidden_states[1].view())?),
+            SessionInputValue::from(TensorRef::from_array_view(self.hidden_states[2].view())?),
+            SessionInputValue::from(TensorRef::from_array_view(self.hidden_states[3].view())?),
+        ];
 
-    /// Get the threshold used by this VAD instance
-    pub fn threshold(&self) -> f32 {
-        self.threshold
-    }
+        let session_inputs = SessionInputs::ValueArray(input_tensors);
 
-    /// Get the ten_vad library version string
-    pub fn get_version() -> String {
-        unsafe {
-            let version_ptr = ten_vad_get_version();
-            if version_ptr.is_null() {
-                return "Unknown version".to_string();
-            }
-            let version_cstr = std::ffi::CStr::from_ptr(version_ptr);
-            version_cstr.to_string_lossy().into_owned()
+        // Run inference with all inputs
+        let outputs = self.session.run(session_inputs)?;
+
+        // Get VAD score from first output (outputs[0])
+        let vad_score = outputs[0].try_extract_array::<f32>()?[[0, 0, 0]];
+
+        // Update hidden states with outputs[1], outputs[2], outputs[3], outputs[4]
+        for i in 0..MODEL_IO_NUM - 1 {
+            let output_tensor = outputs[i + 1].try_extract_array::<f32>()?;
+            self.hidden_states[i].assign(&output_tensor);
         }
+
+        Ok(vad_score)
+    }
+
+    /// Reset the VAD state
+    pub fn reset(&mut self) {
+        // Reset hidden states
+        for hidden_state in &mut self.hidden_states {
+            hidden_state.fill(0.0f32);
+        }
+
+        // Reset feature buffer
+        self.feature_buffer.fill(0.0f32);
+
+        // Reset pre-emphasis previous value
+        self.pre_emphasis_prev = 0.0f32;
     }
 }
 
-impl Drop for TenVAD {
-    fn drop(&mut self) {
-        unsafe {
-            let result = ten_vad_destroy(&mut self.ten_vad_handle);
-            if result != 0 {
-                eprintln!("Warning: Failed to destroy TenVAD handle: error code {result}");
-            }
-        }
+impl std::fmt::Debug for TenVad {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TenVadOnnx")
+            .field("session", &"Session")
+            .field("hidden_states", &self.hidden_states.len())
+            .field("feature_buffer", &self.feature_buffer.shape())
+            .field("pre_emphasis_prev", &self.pre_emphasis_prev)
+            .field("mel_filters", &self.mel_filters.shape())
+            .field("window", &self.window.len())
+            .finish()
     }
 }
-
-unsafe impl Send for TenVAD {}
-unsafe impl Sync for TenVAD {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_get_version() {
-        let version = TenVAD::get_version();
-        assert!(!version.is_empty());
-        println!("TenVAD version: {version}");
-    }
-
-    #[test]
-    fn test_create_vad() {
-        let vad = TenVAD::new(256, 0.5);
-        assert!(vad.is_ok());
-
-        let vad = vad.unwrap();
-        assert_eq!(vad.hop_size(), 256);
-        assert_eq!(vad.threshold(), 0.5);
-    }
-
-    #[test]
-    fn test_create_vad_invalid_threshold() {
-        let vad = TenVAD::new(256, -0.1);
-        assert!(vad.is_err());
-        assert!(matches!(vad.unwrap_err(), TenVadError::InvalidThreshold(_)));
-
-        let vad = TenVAD::new(256, 1.1);
-        assert!(vad.is_err());
-        assert!(matches!(vad.unwrap_err(), TenVadError::InvalidThreshold(_)));
-    }
-
-    #[test]
-    fn test_create_vad_invalid_hop_size() {
-        let vad = TenVAD::new(0, 0.5);
-        assert!(vad.is_err());
-        assert!(matches!(vad.unwrap_err(), TenVadError::InvalidHopSize(_)));
-    }
-
-    #[test]
-    fn test_process_frame() {
-        let vad = TenVAD::new(256, 0.5).unwrap();
-
-        // Create dummy audio data (silence)
-        let audio_data = vec![0i16; 256];
-        let result = vad.process_frame(&audio_data);
-        assert!(result.is_ok());
-
-        let vad_result = result.unwrap();
-        assert!(vad_result.probability >= 0.0 && vad_result.probability <= 1.0);
-        println!(
-            "Silence frame - Probability: {}, Is voice: {}",
-            vad_result.probability, vad_result.is_voice
+    fn test_generate_mel_filters() {
+        let mel_filters = TenVad::generate_mel_filters();
+        assert_eq!(
+            mel_filters.shape(),
+            &[MEL_FILTER_BANK_NUM, FFT_SIZE / 2 + 1]
         );
     }
 
     #[test]
-    fn test_process_frame_wrong_size() {
-        let vad = TenVAD::new(256, 0.5).unwrap();
-
-        // Create audio data with wrong size
-        let audio_data = vec![0i16; 128]; // Wrong size
-        let result = vad.process_frame(&audio_data);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            TenVadError::AudioSizeMismatch { .. }
-        ));
+    fn test_generate_hann_window() {
+        let window = TenVad::generate_hann_window();
+        assert_eq!(window.len(), WINDOW_SIZE);
+        assert!(window.iter().all(|&x| (0.0..=1.0).contains(&x)));
     }
 
     #[test]
-    fn test_process_synthetic_audio() {
-        let vad = TenVAD::new(256, 0.5).unwrap();
-
-        // Create synthetic audio data with some signal
-        let mut audio_data = vec![0i16; 256];
-
-        // Add some sine wave to simulate voice-like signal
-        for (i, sample) in audio_data.iter_mut().enumerate() {
-            let sine_value = (1000.0 * (i as f32 * 0.1).sin()) as i16;
-            *sample = sine_value;
-        }
-
-        let result = vad.process_frame(&audio_data);
-        assert!(result.is_ok());
-
-        let vad_result = result.unwrap();
-        assert!(vad_result.probability >= 0.0 && vad_result.probability <= 1.0);
-        println!(
-            "Synthetic audio - Probability: {}, Is voice: {}",
-            vad_result.probability, vad_result.is_voice
-        );
+    fn test_pre_emphasis() {
+        let mut vad = TenVad::new("onnx/ten-vad.onnx").unwrap();
+        let audio_frame = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        let emphasized = vad.pre_emphasis(&audio_frame);
+        assert_eq!(emphasized.len(), audio_frame.len());
     }
 
     #[test]
-    fn test_different_thresholds() {
-        let thresholds = [0.1, 0.3, 0.5, 0.7, 0.9];
-
-        for threshold in thresholds {
-            let vad = TenVAD::new(256, threshold).unwrap();
-            assert_eq!(vad.threshold(), threshold);
-
-            // Test with some audio data
-            let audio_data = vec![100i16; 256]; // Some non-zero audio
-            let result = vad.process_frame(&audio_data);
-            assert!(result.is_ok());
-
-            let vad_result = result.unwrap();
-            println!(
-                "Threshold {}: Probability: {}, Is voice: {}",
-                threshold, vad_result.probability, vad_result.is_voice
-            );
-        }
-    }
-
-    #[test]
-    fn test_different_hop_sizes() {
-        let hop_sizes = [128, 256, 512, 1024];
-
-        for hop_size in hop_sizes {
-            let vad = TenVAD::new(hop_size, 0.5).unwrap();
-            assert_eq!(vad.hop_size(), hop_size);
-
-            // Test with matching audio data size
-            let audio_data = vec![0i16; hop_size];
-            let result = vad.process_frame(&audio_data);
-            assert!(result.is_ok());
-
-            let vad_result = result.unwrap();
-            println!(
-                "Hop size {}: Probability: {}, Is voice: {}",
-                hop_size, vad_result.probability, vad_result.is_voice
-            );
-        }
-    }
-
-    #[test]
-    fn test_vad_result_debug() {
-        let result = VadResult {
-            probability: 0.75,
-            is_voice: true,
-        };
-
-        let debug_str = format!("{result:?}");
-        assert!(debug_str.contains("0.75"));
-        assert!(debug_str.contains("true"));
-    }
-
-    #[test]
-    fn test_multiple_instances() {
-        let vad1 = TenVAD::new(256, 0.3).unwrap();
-        let vad2 = TenVAD::new(512, 0.7).unwrap();
-
-        let audio_data1 = vec![0i16; 256];
-        let audio_data2 = vec![0i16; 512];
-
-        let result1 = vad1.process_frame(&audio_data1);
-        let result2 = vad2.process_frame(&audio_data2);
-
-        assert!(result1.is_ok());
-        assert!(result2.is_ok());
-
-        println!("VAD1 result: {:?}", result1.unwrap());
-        println!("VAD2 result: {:?}", result2.unwrap());
-    }
-
-    #[test]
-    fn test_voice_only_processing() {
-        let vad = TenVAD::new(256, 0.3).unwrap();
-
-        // Create audio with some voice-like patterns
-        let mut audio_data = vec![0i16; 256 * 10]; // 10 frames
-
-        // Add some "voice-like" signal to middle frames
-        for i in 2..5 {
-            let start = i * 256;
-            let end = start + 256;
-            for (j, sample) in audio_data[start..end].iter_mut().enumerate() {
-                *sample = (((start + j) as f32 * 0.1).sin() * 1000.0) as i16;
-            }
-        }
-
-        let voice_frames = vad.process_frames_voice_only(&audio_data).unwrap();
-
-        // Should have detected some voice frames
-        assert!(!voice_frames.is_empty());
-
-        // All returned frames should have is_voice = true
-        for (_, result) in &voice_frames {
-            assert!(result.is_voice);
-        }
-    }
-
-    #[test]
-    fn test_streaming_processing() {
-        let vad = TenVAD::new(256, 0.5).unwrap();
-        let audio_data = vec![0i16; 256 * 5]; // 5 frames
-
-        let mut frame_count = 0;
-        let mut voice_count = 0;
-
-        let result = vad.process_frames_streaming(&audio_data, |frame_idx, result| {
-            frame_count += 1;
-            if result.is_voice {
-                voice_count += 1;
-            }
-            assert_eq!(frame_idx, frame_count - 1);
-            true // Continue processing
-        });
-
-        assert!(result.is_ok());
-        assert_eq!(frame_count, 5);
-    }
-
-    #[test]
-    fn test_streaming_early_termination() {
-        let vad = TenVAD::new(256, 0.5).unwrap();
-        let audio_data = vec![0i16; 256 * 10]; // 10 frames
-
-        let mut frame_count = 0;
-
-        let result = vad.process_frames_streaming(&audio_data, |_frame_idx, _result| {
-            frame_count += 1;
-            frame_count < 3 // Stop after 3 frames
-        });
-
-        assert!(result.is_ok());
-        assert_eq!(frame_count, 3);
-    }
-
-    #[test]
-    fn test_error_types() {
-        // Test invalid threshold
-        let result = TenVAD::new(256, -0.1);
-        assert!(matches!(result, Err(TenVadError::InvalidThreshold(_))));
-
-        let result = TenVAD::new(256, 1.5);
-        assert!(matches!(result, Err(TenVadError::InvalidThreshold(_))));
-
-        // Test invalid hop size
-        let result = TenVAD::new(0, 0.5);
-        assert!(matches!(result, Err(TenVadError::InvalidHopSize(_))));
-
-        // Test audio size mismatch
-        let vad = TenVAD::new(256, 0.5).unwrap();
-        let wrong_size_audio = vec![0i16; 128];
-        let result = vad.process_frame(&wrong_size_audio);
-        assert!(matches!(result, Err(TenVadError::AudioSizeMismatch { .. })));
+    fn test_extract_features() {
+        let mut vad = TenVad::new("onnx/ten-vad.onnx").unwrap();
+        let audio_frame = vec![0.0; WINDOW_SIZE]; // Zero input for simplicity
+        let features = vad.extract_features(&audio_frame);
+        assert_eq!(features.len(), FEATURE_LEN);
     }
 }

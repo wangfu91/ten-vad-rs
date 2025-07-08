@@ -2,7 +2,7 @@
 name = "ten-vad-rs"
 version = "0.1.0"
 edition = "2024"
-description = "Rust wrapper for TenVAD voice activity detection library"
+description = "Rust library for working with the TEN VAD ONNX model."
 authors = ["Fu Wang <wangfu91@hotmail.com>"]
 license = "Apache-2.0"
 readme = "README.md"
@@ -10,16 +10,11 @@ repository = "https://github.com/wangfu91/ten-vad-rs"
 keywords = ["vad", "voice", "audio", "detection", "speech"]
 categories = ["multimedia::audio", "science"]
 
-# Performance optimization profiles
 [profile.release]
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-
-[profile.bench]
-inherits = "release"
-debug = true
 
 [dependencies]
 ndarray = "0.16.1"
@@ -27,9 +22,7 @@ ort = "=2.0.0-rc.10"
 rubato = "0.16.2"
 thiserror = "2.0.12"
 rustfft = "6.2.0"
-
-[build-dependencies]
-bindgen = "0.72.0"
+log = "0.4.27"
 
 [dev-dependencies]
 hound = "3.5.1"
