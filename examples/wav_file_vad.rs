@@ -10,7 +10,7 @@ const TARGET_SAMPLE_RATE: u32 = 16000; // Required sample rate for TEN VAD (16kH
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
-    if args.len() <= 2 {
+    if args.len() < 2 {
         eprintln!("Usage: {} <wav_file_path>", args[0]);
         eprintln!("Example: {} input.wav", args[0]);
         std::process::exit(1);
