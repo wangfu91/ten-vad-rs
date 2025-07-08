@@ -2,7 +2,6 @@
 
 mod audio_segment;
 mod error;
-pub mod utils;
 
 // Re-export error types for public API
 pub use crate::audio_segment::AudioSegment;
