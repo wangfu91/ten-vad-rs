@@ -1,4 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::thread;
 use ten_vad_rs::{AudioSegment, TenVad, utils};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
@@ -24,29 +25,14 @@ fn main() -> anyhow::Result<()> {
     println!("Input device: {}", input_device.name()?);
     println!("Sample rate: {sample_rate} Hz, Channels: {channels}");
 
-    let mut audio_segment = AudioSegment::new();
+    let (tx, rx) = std::sync::mpsc::channel();
 
     let input_stream = input_device.build_input_stream(
         &input_stream_config.into(),
         move |data: &[i16], _| {
             let samples =
                 preprocess_audio(data, channels as u32, sample_rate, TARGET_SAMPLE_RATE).unwrap();
-
-            audio_segment.append_samples(&samples);
-
-            while let Some(frame) = audio_segment.get_audio_frame(HOP_SIZE) {
-                // Process each frame of audio data
-                match vad.process_frame(&frame) {
-                    Ok(vad_score) => {
-                        if vad_score >= THRESHOLD {
-                            println!("++++++ Detected voice in frame: probability {vad_score:2}");
-                        } else {
-                            println!("------ No voice detected in frame");
-                        }
-                    }
-                    Err(e) => eprintln!("Error processing frame: {e}"),
-                }
-            }
+            tx.send(samples).unwrap();
         },
         move |err| eprintln!("Input stream error: {err}"),
         None,
@@ -54,7 +40,35 @@ fn main() -> anyhow::Result<()> {
 
     input_stream.play()?;
 
-    std::thread::sleep(std::time::Duration::from_secs(300));
+    let join_handle = thread::spawn(move || {
+        let mut audio_segment = AudioSegment::new();
+        loop {
+            if let Ok(samples) = rx.recv() {
+                audio_segment.append_samples(&samples);
+
+                while let Some(frame) = audio_segment.get_audio_frame(HOP_SIZE) {
+                    // Process each frame of audio data
+                    match vad.process_frame(&frame) {
+                        Ok(vad_score) => {
+                            if vad_score >= THRESHOLD {
+                                println!(
+                                    "++++++ Detected voice in frame: probability {vad_score:2}"
+                                );
+                            } else {
+                                println!("------ No voice detected in frame");
+                            }
+                        }
+                        Err(e) => eprintln!("Error processing frame: {e}"),
+                    }
+                }
+            } else {
+                eprintln!("Error receiving audio samples from the channel.");
+                break;
+            }
+        }
+    });
+
+    join_handle.join().expect("Thread panicked");
 
     Ok(())
 }
