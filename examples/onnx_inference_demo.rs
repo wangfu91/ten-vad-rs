@@ -1,6 +1,4 @@
-use std::f32::consts::PI;
 use std::io::BufReader;
-use ten_vad_rs::TenVadResult;
 use ten_vad_rs::onnx::TenVadOnnx;
 
 fn main() -> anyhow::Result<()> {

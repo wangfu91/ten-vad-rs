@@ -1,13 +1,15 @@
 use crate::{TenVadError, TenVadResult};
-use ndarray::{Array1, Array2, Array3};
-use ort::session::Session;
+use ndarray::{Array1, Array2, Array3, Axis};
 use ort::session::builder::GraphOptimizationLevel;
-use rustfft::{FftPlanner, num_complex::Complex32};
-use std::f32::consts::PI;
+use ort::session::{SessionInputValue, SessionInputs};
+use ort::{session::Session, value::TensorRef};
+use rustfft::{Fft, FftPlanner, num_complex::Complex32};
+use std::{f32::consts::PI, sync::Arc};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
 const THRESHOLD: f32 = 0.5; // Default threshold for VAD
 const TARGET_SAMPLE_RATE: u32 = 16000; // Target sample rate for VAD (16kHz)
+
 const FFT_SIZE: usize = 1024;
 const WINDOW_SIZE: usize = 768;
 const MEL_FILTER_BANK_NUM: usize = 40;
@@ -18,6 +20,7 @@ const MODEL_IO_NUM: usize = 5;
 const EPS: f32 = 1e-20;
 const PRE_EMPHASIS_COEFF: f32 = 0.97;
 
+/// Means of input-mel-filterbank (from coeff.h)
 #[rustfmt::skip]
 pub const FEATURE_MEANS: [f32; 41] = [
     -8.198236465454e+00, -6.265716552734e+00, -5.483818531036e+00,
@@ -36,6 +39,7 @@ pub const FEATURE_MEANS: [f32; 41] = [
     -4.480289459229e+00, 9.235690307617e+01
 ];
 
+/// Stds of input-mel-filterbank (from coeff.h)
 #[rustfmt::skip]
 pub const FEATURE_STDS: [f32; 41] = [
     5.166063785553e+00, 4.977209568024e+00, 4.698895931244e+00,
@@ -55,13 +59,15 @@ pub const FEATURE_STDS: [f32; 41] = [
 ];
 
 pub struct TenVadOnnx {
-    threshold: f32,
-    session: Session,
+    threshold: f32,                  // VAD threshold
+    session: Session,                // ONNX session for inference
     hidden_states: Vec<Array2<f32>>, // Vector of 2D arrays: [MODEL_IO_NUM - 1] each [1, MODEL_HIDDEN_DIM]
     feature_buffer: Array2<f32>,     // 2D array: [CONTEXT_WINDOW_LEN, FEATURE_LEN]
-    pre_emphasis_prev: f32,
-    mel_filters: Array2<f32>, // 2D array: [MEL_FILTER_BANK_NUM, n_bins]
-    window: Array1<f32>,      // 1D array: [WINDOW_SIZE]
+    pre_emphasis_prev: f32,          // Previous value for pre-emphasis filtering
+    mel_filters: Array2<f32>,        // 2D array: [MEL_FILTER_BANK_NUM, n_bins]
+    window: Array1<f32>,             // 1D array: [WINDOW_SIZE]
+    fft_instance: Arc<dyn Fft<f32>>, // Cached FFT instance
+    fft_buffer: Vec<Complex32>,      // Reusable FFT buffer
 }
 
 impl TenVadOnnx {
@@ -94,6 +100,11 @@ impl TenVadOnnx {
         // Generate Hann window
         let window = Self::generate_hann_window();
 
+        // Create and cache FFT planner and instance
+        let mut fft_planner = FftPlanner::new();
+        let fft_instance = fft_planner.plan_fft_forward(FFT_SIZE);
+        let fft_buffer = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
+
         println!("Loaded ONNX model: {onnx_model_path}");
         println!("VAD threshold set to: {threshold}");
 
@@ -105,9 +116,15 @@ impl TenVadOnnx {
             pre_emphasis_prev,
             mel_filters,
             window,
+            fft_instance,
+            fft_buffer,
         })
     }
 
+    /// Generate mel filter-bank coefficients(Adapted from aed.cc).
+    ///
+    /// A mel filter bank is a set of filters used in audio processing to mimic the human ear's perception of sound frequencies.
+    /// These filters are spaced according to the mel scale, which is more sensitive to lower frequencies and less sensitive to higher frequencies.
     fn generate_mel_filters() -> Array2<f32> {
         let n_bins = FFT_SIZE / 2 + 1;
 
@@ -160,6 +177,7 @@ impl TenVadOnnx {
         mel_filters
     }
 
+    /// Generate Hann window coefficients
     fn generate_hann_window() -> Array1<f32> {
         let mut window = Array1::zeros(WINDOW_SIZE);
         for i in 0..WINDOW_SIZE {
@@ -167,19 +185,6 @@ impl TenVadOnnx {
             window[i] = value;
         }
         window
-    }
-
-    pub fn reset(&mut self) {
-        // Reset hidden states
-        for hidden_state in &mut self.hidden_states {
-            hidden_state.fill(0.0f32);
-        }
-
-        // Reset feature buffer
-        self.feature_buffer.fill(0.0f32);
-
-        // Reset pre-emphasis previous value
-        self.pre_emphasis_prev = 0.0f32;
     }
 
     /// Pre-emphasis filtering
@@ -215,24 +220,23 @@ impl TenVadOnnx {
         // Windowing
         let windowed = &padded * &self.window;
 
-        // FFT
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(FFT_SIZE);
+        // FFT - use cached FFT instance and reusable buffer
+        self.fft_buffer.clear();
+        self.fft_buffer.resize(FFT_SIZE, Complex32::new(0.0, 0.0));
 
         // Prepare input for FFT (real to complex)
-        let mut fft_input = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
         for i in 0..WINDOW_SIZE.min(FFT_SIZE) {
-            fft_input[i] = Complex32::new(windowed[i], 0.0);
+            self.fft_buffer[i] = Complex32::new(windowed[i], 0.0);
         }
 
-        // Perform FFT
-        fft.process(&mut fft_input);
+        // Perform FFT using cached instance
+        self.fft_instance.process(&mut self.fft_buffer);
 
         // Compute power spectrum (only positive frequencies)
         let n_bins = FFT_SIZE / 2 + 1;
         let mut power_spectrum = Array1::zeros(n_bins);
         for i in 0..n_bins {
-            power_spectrum[i] = fft_input[i].norm_sqr();
+            power_spectrum[i] = self.fft_buffer[i].norm_sqr();
         }
 
         // Normalization (corresponding to powerNormal = 32768^2 in C++)
@@ -261,6 +265,11 @@ impl TenVadOnnx {
         features
     }
 
+    /// Process a single audio frame and return VAD score and decision
+    /// # Arguments
+    /// * `audio_frame` - A slice of i16 audio samples (e.g., from a microphone)
+    /// # Returns
+    /// * A tuple containing the VAD score (f32) and a boolean indicating if speech is detected
     pub fn process_frame(&mut self, audio_frame: &[i16]) -> TenVadResult<(f32, bool)> {
         // Convert i16 to f32
         let audio_f32: Vec<f32> = audio_frame.iter().map(|&x| x as f32).collect();
@@ -269,54 +278,55 @@ impl TenVadOnnx {
         let features = self.extract_features(&audio_f32);
 
         // Update feature buffer (sliding window)
-        // Move all rows up by one and set the last row to new features
-        for i in 0..CONTEXT_WINDOW_LEN - 1 {
-            for j in 0..FEATURE_LEN {
-                self.feature_buffer[[i, j]] = self.feature_buffer[[i + 1, j]];
+        // Shift existing features up and add new features at the end
+        if CONTEXT_WINDOW_LEN > 1 {
+            // Use a simple loop to shift rows up
+            for i in 0..CONTEXT_WINDOW_LEN - 1 {
+                // Copy row i+1 to row i
+                let src_row = self.feature_buffer.row(i + 1).to_owned();
+                self.feature_buffer.row_mut(i).assign(&src_row);
             }
         }
-
         // Set the last row to new features
-        for j in 0..FEATURE_LEN {
-            self.feature_buffer[[CONTEXT_WINDOW_LEN - 1, j]] = features[j];
-        }
+        self.feature_buffer
+            .row_mut(CONTEXT_WINDOW_LEN - 1)
+            .assign(&features);
 
-        // ONNX inference
-        // Prepare input tensor - reshape feature buffer to [1, CONTEXT_WINDOW_LEN, FEATURE_LEN]
-        let input_array = Array3::from_shape_vec(
-            (1, CONTEXT_WINDOW_LEN, FEATURE_LEN),
-            self.feature_buffer.clone().into_raw_vec_and_offset().0,
-        )
-        .map_err(|_| TenVadError::AllocationError)?;
+        // Prepare ONNX inference input
+        // Reshape feature buffer, [CONTEXT_WINDOW_LEN, FEATURE_LEN] to [1, CONTEXT_WINDOW_LEN, FEATURE_LEN]
+        let input_features = self.feature_buffer.view().insert_axis(Axis(0)); // shape: (1, CONTEXT_WINDOW_LEN, FEATURE_LEN)
 
-        // Create input tensors
-        let input_1 = ort::value::TensorRef::from_array_view(input_array.view())?;
-        let input_2 = ort::value::TensorRef::from_array_view(self.hidden_states[0].view())?;
-        let input_3 = ort::value::TensorRef::from_array_view(self.hidden_states[1].view())?;
-        let input_6 = ort::value::TensorRef::from_array_view(self.hidden_states[2].view())?;
-        let input_7 = ort::value::TensorRef::from_array_view(self.hidden_states[3].view())?;
+        // Build input array directly
+        let input_tensors: [SessionInputValue; MODEL_IO_NUM] = [
+            // Input features as first input
+            SessionInputValue::from(TensorRef::from_array_view(input_features)?),
+            // Add hidden states as inputs
+            SessionInputValue::from(TensorRef::from_array_view(self.hidden_states[0].view())?),
+            SessionInputValue::from(TensorRef::from_array_view(self.hidden_states[1].view())?),
+            SessionInputValue::from(TensorRef::from_array_view(self.hidden_states[2].view())?),
+            SessionInputValue::from(TensorRef::from_array_view(self.hidden_states[3].view())?),
+        ];
+
+        let session_inputs = SessionInputs::ValueArray(input_tensors);
 
         // Run inference with all inputs
-        let outputs = self.session.run(ort::inputs![
-            "input_1" => input_1,
-            "input_2" => input_2,
-            "input_3" => input_3,
-            "input_6" => input_6,
-            "input_7" => input_7,
-        ])?;
+        let outputs = self.session.run(session_inputs)?;
 
         // Extract the VAD score from output_1 (first output)
         let output_tensor = outputs["output_1"].try_extract_array::<f32>()?;
 
-        // Get the VAD score - assuming it's the last element in the sequence
+        // Get the VAD score - the output shape should be [1, 1, 1] based on C++ code
         let vad_score = if !output_tensor.is_empty() {
-            // The output shape is [batch, sequence_length, 1], so we take the last sequence element
             let shape = output_tensor.shape();
-            if shape.len() == 3 && shape[2] == 1 {
-                // Take the last element in the sequence dimension
+            if shape.len() == 3 && shape[0] == 1 && shape[1] == 1 && shape[2] == 1 {
+                // Extract the single scalar value from [1, 1, 1] tensor
+                output_tensor[[0, 0, 0]]
+            } else if shape.len() == 3 && shape[2] == 1 {
+                // Fallback: take the last element in the sequence dimension if different shape
                 let last_seq_idx = shape[1] - 1;
                 output_tensor[[0, last_seq_idx, 0]]
             } else {
+                // Fallback: take first element
                 output_tensor.iter().next().copied().unwrap_or(0.0)
             }
         } else {
@@ -343,6 +353,20 @@ impl TenVadOnnx {
         Ok((vad_score, vad_result))
     }
 
+    /// Reset the VAD state
+    pub fn reset(&mut self) {
+        // Reset hidden states
+        for hidden_state in &mut self.hidden_states {
+            hidden_state.fill(0.0f32);
+        }
+
+        // Reset feature buffer
+        self.feature_buffer.fill(0.0f32);
+
+        // Reset pre-emphasis previous value
+        self.pre_emphasis_prev = 0.0f32;
+    }
+
     /// Get the threshold value
     pub fn get_threshold(&self) -> f32 {
         self.threshold
@@ -355,5 +379,42 @@ impl TenVadOnnx {
         }
         self.threshold = threshold;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_mel_filters() {
+        let mel_filters = TenVadOnnx::generate_mel_filters();
+        assert_eq!(
+            mel_filters.shape(),
+            &[MEL_FILTER_BANK_NUM, FFT_SIZE / 2 + 1]
+        );
+    }
+
+    #[test]
+    fn test_generate_hann_window() {
+        let window = TenVadOnnx::generate_hann_window();
+        assert_eq!(window.len(), WINDOW_SIZE);
+        assert!(window.iter().all(|&x| x >= 0.0 && x <= 1.0));
+    }
+
+    #[test]
+    fn test_pre_emphasis() {
+        let mut vad = TenVadOnnx::new("dummy.onnx", 0.5).unwrap();
+        let audio_frame = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        let emphasized = vad.pre_emphasis(&audio_frame);
+        assert_eq!(emphasized.len(), audio_frame.len());
+    }
+
+    #[test]
+    fn test_extract_features() {
+        let mut vad = TenVadOnnx::new("dummy.onnx", 0.5).unwrap();
+        let audio_frame = vec![0.0; WINDOW_SIZE]; // Zero input for simplicity
+        let features = vad.extract_features(&audio_frame);
+        assert_eq!(features.len(), FEATURE_LEN);
     }
 }
