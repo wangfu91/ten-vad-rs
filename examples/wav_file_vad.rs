@@ -6,7 +6,7 @@ use ten_vad_rs::{AudioSegment, TenVad, utils};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
 const THRESHOLD: f32 = 0.5; // Default threshold for VAD
-const TARGET_SAMPLE_RATE: u32 = 16000; // Target sample rate for VAD (16kHz)
+const TARGET_SAMPLE_RATE: u32 = 16000; // Required sample rate for TEN VAD (16kHz)
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -41,7 +41,7 @@ fn process_wav_file(wav_file_path: &str, vad: &mut TenVad) -> anyhow::Result<()>
         return Err(anyhow!("Only 16-bit PCM WAV files are supported"));
     }
 
-    let mut audio_segment = AudioSegment::new(HOP_SIZE);
+    let mut audio_segment = AudioSegment::new();
 
     let all_samples = reader.samples::<i16>().collect::<Result<Vec<i16>, _>>()?;
 
@@ -54,7 +54,7 @@ fn process_wav_file(wav_file_path: &str, vad: &mut TenVad) -> anyhow::Result<()>
 
     audio_segment.append_samples(&processed_samples);
 
-    while let Some(frame) = audio_segment.get_fixed_size_samples() {
+    while let Some(frame) = audio_segment.get_audio_frame(HOP_SIZE) {
         match vad.process_frame(&frame) {
             Ok(vad_score) => {
                 if vad_score >= THRESHOLD {

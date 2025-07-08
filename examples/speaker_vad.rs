@@ -1,9 +1,12 @@
+// This example is for Windows only.
+#![cfg(target_os = "windows")]
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ten_vad_rs::{AudioSegment, TenVad, utils};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
 const THRESHOLD: f32 = 0.5; // Default threshold for VAD
-const TARGET_SAMPLE_RATE: u32 = 16000; // Target sample rate for VAD (16kHz)
+const TARGET_SAMPLE_RATE: u32 = 16000; // Required sample rate for TEN VAD (16kHz)
 
 fn main() -> anyhow::Result<()> {
     println!("TenVAD Speaker Example");
@@ -24,7 +27,7 @@ fn main() -> anyhow::Result<()> {
     println!("Output device: {}", output_device.name()?);
     println!("Sample rate: {sample_rate} Hz, Channels: {channels}");
 
-    let mut audio_segment = AudioSegment::new(HOP_SIZE);
+    let mut audio_segment = AudioSegment::new();
 
     let input_stream = output_device.build_input_stream(
         &output_stream_config.into(),
@@ -34,7 +37,7 @@ fn main() -> anyhow::Result<()> {
 
             audio_segment.append_samples(&samples);
 
-            while let Some(frame) = audio_segment.get_fixed_size_samples() {
+            while let Some(frame) = audio_segment.get_audio_frame(HOP_SIZE) {
                 // Process each frame of audio data
                 match vad.process_frame(&frame) {
                     Ok(vad_score) => {
