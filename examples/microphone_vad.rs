@@ -1,6 +1,9 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
 use std::thread;
-use ten_vad_rs::{AudioSegment, TenVad, utils};
+use ten_vad_rs::{AudioSegment, TenVad};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
 const THRESHOLD: f32 = 0.5; // Default threshold for VAD
@@ -19,20 +22,18 @@ fn main() -> anyhow::Result<()> {
         .default_input_config()
         .map_err(|e| anyhow::anyhow!("Failed to get default input config: {}", e))?;
 
-    let sample_rate = input_stream_config.sample_rate().0;
-    let channels = input_stream_config.channels() as usize;
+    let input_sample_rate = input_stream_config.sample_rate().0;
+    let input_channels = input_stream_config.channels() as usize;
 
     println!("Input device: {}", input_device.name()?);
-    println!("Sample rate: {sample_rate} Hz, Channels: {channels}");
+    println!("Sample rate: {input_sample_rate} Hz, Channels: {input_channels}");
 
     let (tx, rx) = std::sync::mpsc::channel();
 
     let input_stream = input_device.build_input_stream(
         &input_stream_config.into(),
-        move |data: &[i16], _| {
-            let samples =
-                preprocess_audio(data, channels as u32, sample_rate, TARGET_SAMPLE_RATE).unwrap();
-            tx.send(samples).unwrap();
+        move |data: &[f32], _| {
+            tx.send(data.to_vec()).unwrap();
         },
         move |err| eprintln!("Input stream error: {err}"),
         None,
@@ -41,10 +42,54 @@ fn main() -> anyhow::Result<()> {
     input_stream.play()?;
 
     let join_handle = thread::spawn(move || {
+        let params = SincInterpolationParameters {
+            sinc_len: 256,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 256,
+            window: WindowFunction::BlackmanHarris2,
+        };
+
+        let mut resampler = SincFixedIn::<f32>::new(
+            TARGET_SAMPLE_RATE as f64 / input_sample_rate as f64,
+            2.0, // max_relative_ratio
+            params,
+            480,
+            1,
+        )
+        .unwrap();
+        let mut resampler_output_buffer = resampler.output_buffer_allocate(true);
+
         let mut audio_segment = AudioSegment::new();
+
         loop {
-            if let Ok(samples) = rx.recv() {
-                audio_segment.append_samples(&samples);
+            if let Ok(f32_samples) = rx.recv() {
+                let mono_f32_samples = if input_channels == 1 {
+                    f32_samples
+                } else {
+                    // Convert stereo to mono by averaging the channels
+                    let mut mono_samples = vec![0.0; f32_samples.len() / input_channels];
+                    for (i, &sample) in f32_samples.iter().enumerate() {
+                        mono_samples[i / input_channels] += sample;
+                    }
+                    mono_samples
+                        .iter_mut()
+                        .for_each(|s| *s /= input_channels as f32);
+                    mono_samples
+                };
+
+                let (_, out_len) = resampler
+                    .process_into_buffer(&[&mono_f32_samples], &mut resampler_output_buffer, None)
+                    .expect("Failed to resample audio");
+
+                let resampled_f32_samples = &resampler_output_buffer[0][..out_len];
+
+                let resampled_i16_samples: Vec<i16> = resampled_f32_samples
+                    .iter()
+                    .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                    .collect();
+
+                audio_segment.append_samples(&resampled_i16_samples);
 
                 while let Some(frame) = audio_segment.get_audio_frame(HOP_SIZE) {
                     // Process each frame of audio data
@@ -71,25 +116,4 @@ fn main() -> anyhow::Result<()> {
     join_handle.join().expect("Thread panicked");
 
     Ok(())
-}
-
-fn preprocess_audio(
-    samples: &[i16],
-    channels: u32,
-    input_sample_rate: u32,
-    output_sample_rate: u32,
-) -> anyhow::Result<Vec<i16>> {
-    // Convert stereo to mono if needed
-    let mono_samples = if channels > 1 {
-        utils::convert_to_mono(samples, channels)
-    } else {
-        samples.to_vec()
-    };
-
-    // Resample to 16kHz if necessary
-    utils::resampling(&mono_samples, input_sample_rate, output_sample_rate).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to resample audio from {input_sample_rate}Hz to {output_sample_rate}Hz: {e}"
-        )
-    })
 }
