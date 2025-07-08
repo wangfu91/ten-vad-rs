@@ -1,5 +1,5 @@
 use crate::{TenVadError, TenVadResult};
-use ndarray::{Array1, Array2, Array3, Axis};
+use ndarray::{Array1, Array2, Axis};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::{SessionInputValue, SessionInputs};
 use ort::{session::Session, value::TensorRef};
@@ -312,45 +312,19 @@ impl TenVadOnnx {
         // Run inference with all inputs
         let outputs = self.session.run(session_inputs)?;
 
-        // Extract the VAD score from output_1 (first output)
-        let output_tensor = outputs["output_1"].try_extract_array::<f32>()?;
+        // Get VAD score from first output (outputs[0])
+        let vad_score = outputs[0].try_extract_array::<f32>()?[[0, 0, 0]];
 
-        // Get the VAD score - the output shape should be [1, 1, 1] based on C++ code
-        let vad_score = if !output_tensor.is_empty() {
-            let shape = output_tensor.shape();
-            if shape.len() == 3 && shape[0] == 1 && shape[1] == 1 && shape[2] == 1 {
-                // Extract the single scalar value from [1, 1, 1] tensor
-                output_tensor[[0, 0, 0]]
-            } else if shape.len() == 3 && shape[2] == 1 {
-                // Fallback: take the last element in the sequence dimension if different shape
-                let last_seq_idx = shape[1] - 1;
-                output_tensor[[0, last_seq_idx, 0]]
-            } else {
-                // Fallback: take first element
-                output_tensor.iter().next().copied().unwrap_or(0.0)
-            }
-        } else {
-            0.0
-        };
-
-        // Update hidden states with the new outputs
-        let output_2 = outputs["output_2"].try_extract_array::<f32>()?;
-        let output_3 = outputs["output_3"].try_extract_array::<f32>()?;
-        let output_6 = outputs["output_6"].try_extract_array::<f32>()?;
-        let output_7 = outputs["output_7"].try_extract_array::<f32>()?;
-
-        // Copy the updated hidden states back
-        for i in 0..MODEL_HIDDEN_DIM {
-            self.hidden_states[0][[0, i]] = output_2[[0, i]];
-            self.hidden_states[1][[0, i]] = output_3[[0, i]];
-            self.hidden_states[2][[0, i]] = output_6[[0, i]];
-            self.hidden_states[3][[0, i]] = output_7[[0, i]];
+        // Update hidden states with outputs[1], outputs[2], outputs[3], outputs[4]
+        for i in 0..MODEL_IO_NUM - 1 {
+            let output_tensor = outputs[i + 1].try_extract_array::<f32>()?;
+            self.hidden_states[i].assign(&output_tensor);
         }
 
         // VAD decision
-        let vad_result = vad_score > self.threshold;
+        let is_voice = vad_score > self.threshold;
 
-        Ok((vad_score, vad_result))
+        Ok((vad_score, is_voice))
     }
 
     /// Reset the VAD state
