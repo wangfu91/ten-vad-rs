@@ -86,7 +86,7 @@ fn main() -> anyhow::Result<()> {
 
                 let resampled_i16_samples: Vec<i16> = resampled_f32_samples
                     .iter()
-                    .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                    .map(|&s| (s * i16::MAX as f32).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16)
                     .collect();
 
                 audio_segment.append_samples(&resampled_i16_samples);
