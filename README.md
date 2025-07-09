@@ -4,14 +4,14 @@
 [![Docs.rs](https://docs.rs/ten-vad-rs/badge.svg)](https://docs.rs/ten-vad-rs)
 [![License](https://img.shields.io/crates/l/ten-vad-rs.svg)](./LICENSE)
 
-A Rust library for working with the TEN VAD (Voice Activity Detection) ONNX model. Detect speech in audio streams with high accuracy and performance! 🚀
+A Rust library for working with the [TEN VAD (Voice Activity Detector)](https://github.com/TEN-framework/ten-vad) ONNX model. A low-latency, high-performance and lightweight solution to detect speech in audio streams. 🚀
 
 ## ✨ Features
 - 🎙️ Real-time voice activity detection
 - 🦀 Pure Rust API
 - 🧠 Powered by ONNX Runtime
 - 📦 Easy integration into your audio projects
-- 🛠️ Example code for microphone, speaker, and WAV file VAD
+- 🛠️ Example code for microphone and WAV file VAD
 
 ## 📦 Installation
 Add to your `Cargo.toml`:
@@ -28,19 +28,16 @@ Here's a simple example using a WAV file:
 use ten_vad_rs::TenVad;
 
 let mut vad = TenVad::new("onnx/ten-vad.onnx").unwrap();
-let speech_segments = vad.process_wav("path/to/audio.wav").unwrap();
-for segment in speech_segments {
-    println!("Speech from {} to {}", segment.start, segment.end);
-}
+let audio_frame = vec![0i16; 256]; // 16-bit PCM audio samples in 16kHz
+let vad_score = vad.process_frame(&audio_frame).unwrap();
 ```
 
 See the [`examples/`](examples/) directory for more advanced usage:
 - `wav_file_vad.rs` — Run VAD on a WAV file
 - `microphone_vad.rs` — Real-time VAD from microphone
-- `speaker_vad.rs` — Real-time VAD from speaker output
 
 ## 🛠️ Building
-Requires Rust 1.76+ and a working ONNX Runtime environment. Build with:
+Requires Rust and a working ONNX Runtime environment. Build with:
 
 ```sh
 cargo build --release
