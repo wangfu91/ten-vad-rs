@@ -668,7 +668,7 @@ mod tests {
         let empty_frame: Vec<i16> = vec![];
         let result = vad.process_frame(&empty_frame);
 
-        assert!(result.is_ok(), "Processing empty frame should succeed");
+        assert!(result.is_err(), "Processing empty frame should fail");
     }
 
     #[test]
