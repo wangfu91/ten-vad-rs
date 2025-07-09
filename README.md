@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/ten-vad-rs.svg)](https://crates.io/crates/ten-vad-rs)
 [![Docs.rs](https://docs.rs/ten-vad-rs/badge.svg)](https://docs.rs/ten-vad-rs)
-[![License](https://img.shields.io/crates/l/ten-vad-rs.svg)](./LICENSE)
+[![License](https://img.shields.io/github/license/wangfu91/ten-vad-rs)](./LICENSE)
 
 A Rust library for working with the [TEN VAD (Voice Activity Detector)](https://github.com/TEN-framework/ten-vad) ONNX model. A low-latency, high-performance and lightweight solution to detect speech in audio streams. 🚀
 
