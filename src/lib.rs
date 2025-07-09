@@ -62,7 +62,7 @@ const FEATURE_STDS: [f32; 41] = [
     5.096439361572e+00, 1.152136917114e+02
 ];
 
-/// TEN VAD ONNX model wrapper
+/// TEN VAD ONNX model runner
 pub struct TenVad {
     session: Session,                // ONNX session for inference
     hidden_states: Vec<Array2<f32>>, // Vector of 2D arrays: [MODEL_IO_NUM - 1] each [1, MODEL_HIDDEN_DIM]
@@ -275,7 +275,7 @@ impl TenVad {
 
     /// Process a single audio frame and return VAD score and decision
     /// # Arguments
-    /// * `audio_frame` - A slice of i16 audio samples (e.g., from a microphone)
+    /// * `audio_frame` - A slice of i16 audio samples in 16kHz (e.g., from a microphone)
     /// # Returns
     /// * The VAD score (f32)
     pub fn process_frame(&mut self, audio_frame: &[i16]) -> TenVadResult<f32> {
