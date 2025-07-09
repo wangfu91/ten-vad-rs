@@ -1,7 +1,7 @@
 use std::env;
 use std::fs::File;
 use std::io::BufReader;
-use ten_vad_rs::{AudioSegment, TenVad};
+use ten_vad_rs::{AudioFrameBuffer, TenVad};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
 const THRESHOLD: f32 = 0.5; // Default threshold for VAD
@@ -34,7 +34,7 @@ fn process_wav_file(wav_file_path: &str, vad: &mut TenVad) -> anyhow::Result<()>
 
     if spec.sample_rate != TARGET_SAMPLE_RATE {
         return Err(anyhow::anyhow!(
-            "Unsupported sample rate: {} Hz. Required: {} Hz",
+            "Unsupported sample rate: {} Hz. TEN VAD requires {} Hz",
             spec.sample_rate,
             TARGET_SAMPLE_RATE
         ));
@@ -42,12 +42,12 @@ fn process_wav_file(wav_file_path: &str, vad: &mut TenVad) -> anyhow::Result<()>
 
     if spec.channels != 1 {
         return Err(anyhow::anyhow!(
-            "Unsupported number of channels: {}. Required: 1 (mono)",
+            "Unsupported number of channels: {}. TEN VAD requires: 1 (mono)",
             spec.channels
         ));
     }
 
-    let mut audio_segment = AudioSegment::new();
+    let mut audio_buffer = AudioFrameBuffer::new();
 
     let all_i16_samples = if spec.sample_format == hound::SampleFormat::Float {
         reader
@@ -66,19 +66,19 @@ fn process_wav_file(wav_file_path: &str, vad: &mut TenVad) -> anyhow::Result<()>
             .collect::<Vec<i16>>()
     };
 
-    audio_segment.append_samples(&all_i16_samples);
+    audio_buffer.append_samples(all_i16_samples);
 
-    while let Some(frame) = audio_segment.get_audio_frame(HOP_SIZE) {
+    while let Some(frame) = audio_buffer.pop_frame(HOP_SIZE) {
         match vad.process_frame(&frame) {
             Ok(vad_score) => {
                 if vad_score >= THRESHOLD {
-                    println!("++++++ Detected voice in frame: probability {vad_score:2}");
+                    println!("++++++ Voice detected: probability {vad_score:2}");
                 } else {
-                    println!("------ No voice detected in frame");
+                    println!("----- No voice detected");
                 }
             }
             Err(e) => {
-                eprintln!("Error processing frame: {e}");
+                eprintln!("Error running VAD on audio frame: {e}");
             }
         }
     }

@@ -1,10 +1,10 @@
 #![allow(clippy::excessive_precision)]
 
-mod audio_segment;
+mod buffer;
 mod error;
 
 // Re-export error types for public API
-pub use crate::audio_segment::AudioSegment;
+pub use crate::buffer::AudioFrameBuffer;
 pub use crate::error::{TenVadError, TenVadResult};
 
 use ndarray::{Array1, Array2, Axis};
@@ -279,6 +279,11 @@ impl TenVad {
     /// # Returns
     /// * The VAD score (f32)
     pub fn process_frame(&mut self, audio_frame: &[i16]) -> TenVadResult<f32> {
+        // Check if audio frame is empty
+        if audio_frame.is_empty() {
+            return Err(TenVadError::EmptyAudioData);
+        }
+
         // Convert i16 to f32
         let audio_f32: Vec<f32> = audio_frame.iter().map(|&x| x as f32).collect();
 
