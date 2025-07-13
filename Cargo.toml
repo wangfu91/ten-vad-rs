@@ -1,6 +1,6 @@
 [package]
 name = "ten-vad-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Rust library for working with the TEN VAD ONNX model."
 authors = ["Fu Wang <wangfu91@hotmail.com>"]
