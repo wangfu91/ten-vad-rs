@@ -8,6 +8,9 @@ pub enum TenVadError {
 
     #[error("Empty audio data provided")]
     EmptyAudioData,
+
+    #[error("Unsupported sample rate: {0}Hz. TEN VAD only supports 16kHz")]
+    UnsupportedSampleRate(u32),
 }
 
 /// Type alias for TenVAD results

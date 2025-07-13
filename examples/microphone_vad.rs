@@ -3,11 +3,10 @@ use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use std::thread;
-use ten_vad_rs::{AudioFrameBuffer, TenVad};
+use ten_vad_rs::{AudioFrameBuffer, TARGET_SAMPLE_RATE, TenVad};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
 const THRESHOLD: f32 = 0.5; // Default threshold for VAD
-const TARGET_SAMPLE_RATE: u32 = 16000; // Required sample rate for TEN VAD (16kHz)
 const RESAMPLER_CHUNK_SIZE: usize = 1024; // Fixed chunk size for the resampler
 
 // Speech detection parameters (based on Silero VAD approach here: silero-vad/examples/rust-example/src/vad_iter.rs)
@@ -273,7 +272,7 @@ fn run_audio_processing(
 fn main() -> anyhow::Result<()> {
     println!("TenVAD Microphone Example with Robust Speech Detection");
 
-    let vad = TenVad::new("onnx/ten-vad.onnx")?;
+    let vad = TenVad::new("onnx/ten-vad.onnx", TARGET_SAMPLE_RATE)?;
 
     let host = cpal::default_host();
     let input_device = host

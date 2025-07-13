@@ -1,11 +1,10 @@
 use std::env;
 use std::fs::File;
 use std::io::BufReader;
-use ten_vad_rs::{AudioFrameBuffer, TenVad};
+use ten_vad_rs::{AudioFrameBuffer, TARGET_SAMPLE_RATE, TenVad};
 
 const HOP_SIZE: usize = 256; // 16ms at 16kHz
 const THRESHOLD: f32 = 0.5; // Default threshold for VAD
-const TARGET_SAMPLE_RATE: u32 = 16000; // Required sample rate for TEN VAD (16kHz)
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -17,7 +16,7 @@ fn main() -> anyhow::Result<()> {
 
     let wav_file_path = &args[1];
 
-    let mut vad = TenVad::new("onnx/ten-vad.onnx")?;
+    let mut vad = TenVad::new("onnx/ten-vad.onnx", TARGET_SAMPLE_RATE)?;
     process_wav_file(wav_file_path, &mut vad)?;
 
     Ok(())

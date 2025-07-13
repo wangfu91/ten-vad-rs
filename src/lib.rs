@@ -7,6 +7,9 @@ mod error;
 pub use crate::buffer::AudioFrameBuffer;
 pub use crate::error::{TenVadError, TenVadResult};
 
+/// Target sample rate for TEN VAD (16kHz)
+pub const TARGET_SAMPLE_RATE: u32 = 16000;
+
 use ndarray::{Array1, Array2, Axis};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::{SessionInputValue, SessionInputs};
@@ -75,12 +78,22 @@ pub struct TenVad {
 }
 
 impl TenVad {
-    /// Create a new TenVadOnnx instance with the specified ONNX model path and VAD threshold.
+    /// Create a new TenVadOnnx instance with the specified ONNX model path and sample rate.
+    ///
     /// # Arguments
     /// * `onnx_model_path` - Path to the ONNX model file.
+    /// * `sample_rate` - Sample rate in Hz. Must be 16000 (16kHz), otherwise returns an error.
+    ///
     /// # Returns
     /// * A `TenVadResult` containing the initialized `TenVadOnnx` instance or an error.
-    pub fn new(onnx_model_path: &str) -> TenVadResult<Self> {
+    ///
+    /// # Errors
+    /// Returns `TenVadError::UnsupportedSampleRate` if the sample rate is not 16000 Hz.
+    pub fn new(onnx_model_path: &str, sample_rate: u32) -> TenVadResult<Self> {
+        if sample_rate != TARGET_SAMPLE_RATE {
+            return Err(TenVadError::UnsupportedSampleRate(sample_rate));
+        }
+
         // Create ONNX session
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
@@ -372,7 +385,8 @@ mod tests {
 
     // Helper function to create a valid TenVad instance for testing
     fn create_test_vad() -> TenVad {
-        TenVad::new("onnx/ten-vad.onnx").expect("Failed to create TenVad instance for testing")
+        TenVad::new("onnx/ten-vad.onnx", TARGET_SAMPLE_RATE)
+            .expect("Failed to create TenVad instance for testing")
     }
 
     // Helper function to generate test audio with specific properties
@@ -579,7 +593,7 @@ mod tests {
     #[test]
     fn test_new_vad_initialization() {
         // Test that initialization works
-        let vad = TenVad::new("onnx/ten-vad.onnx");
+        let vad = TenVad::new("onnx/ten-vad.onnx", TARGET_SAMPLE_RATE);
         assert!(vad.is_ok(), "TenVad initialization should succeed");
 
         let vad = vad.unwrap();
@@ -612,8 +626,21 @@ mod tests {
 
     #[test]
     fn test_new_vad_invalid_path() {
-        let result = TenVad::new("nonexistent/path/model.onnx");
+        let result = TenVad::new("nonexistent/path/model.onnx", TARGET_SAMPLE_RATE);
         assert!(result.is_err(), "Should fail with invalid model path");
+    }
+
+    #[test]
+    fn test_new_vad_unsupported_sample_rate() {
+        let result = TenVad::new("onnx/ten-vad.onnx", 48000);
+        assert!(result.is_err(), "Should fail with unsupported sample rate");
+
+        match result.unwrap_err() {
+            TenVadError::UnsupportedSampleRate(rate) => {
+                assert_eq!(rate, 48000, "Error should contain the invalid sample rate");
+            }
+            _ => panic!("Expected UnsupportedSampleRate error"),
+        }
     }
 
     #[test]
