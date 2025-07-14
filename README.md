@@ -18,7 +18,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ten-vad-rs = "0.1.0" # Replace with the latest version
+ten-vad-rs = "0.1.1" # Replace with the latest version
 ```
 
 ## 🚀 Quick Start
@@ -27,7 +27,7 @@ Here's a simple example using a WAV file:
 ```rust
 use ten_vad_rs::TenVad;
 
-let mut vad = TenVad::new("onnx/ten-vad.onnx").unwrap();
+let mut vad = TenVad::new("onnx/ten-vad.onnx", 16000).unwrap();
 let audio_frame = vec![0i16; 256]; // 16-bit PCM audio samples in 16kHz
 let vad_score = vad.process_frame(&audio_frame).unwrap();
 ```
