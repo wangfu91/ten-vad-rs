@@ -82,7 +82,7 @@ impl TenVad {
     ///
     /// # Arguments
     /// * `onnx_model_path` - Path to the ONNX model file.
-    /// * `sample_rate` - Sample rate in Hz. Must be 16000 (16kHz), otherwise returns an error.
+    /// * `sample_rate` - Sample rate in Hz. **Must be 16000 (16kHz)**, otherwise returns an error.
     ///
     /// # Returns
     /// * A `TenVadResult` containing the initialized `TenVadOnnx` instance or an error.
@@ -145,7 +145,7 @@ impl TenVad {
     fn generate_mel_filters() -> Array2<f32> {
         let n_bins = FFT_SIZE / 2 + 1;
 
-        // Generate mel frequency points
+        // Generate mel filter-bank coefficients
         let low_mel = 2595.0f32 * (1.0f32 + 0.0f32 / 700.0f32).log10();
         let high_mel = 2595.0f32 * (1.0f32 + 8000.0f32 / 700.0f32).log10();
 
@@ -241,9 +241,10 @@ impl TenVad {
         // Windowing
         let windowed = &padded * &self.window;
 
-        // FFT - use cached FFT instance and reusable buffer
-        self.fft_buffer.clear();
-        self.fft_buffer.resize(FFT_SIZE, Complex32::new(0.0, 0.0));
+        // Zero the FFT buffer before use to clear any previous data (using cached FFT instance and reusable buffer)
+        for elem in &mut self.fft_buffer {
+            *elem = Complex32::new(0.0, 0.0);
+        }
 
         // Prepare input for FFT (real to complex)
         for i in 0..WINDOW_SIZE.min(FFT_SIZE) {
@@ -268,7 +269,8 @@ impl TenVad {
         let mel_features = self.mel_filters.dot(&power_spectrum);
         let mel_features = mel_features.mapv(|x| (x + EPS).ln());
 
-        // Simple pitch estimation (using 0 here, actual C++ code has complex pitch estimation)
+        // TODO: Implement pitch estimation. The original C++ code has a more complex pitch estimation algorithm.
+        // For now, pitch is hardcoded to 0.0.
         let pitch_freq = 0.0f32;
 
         // Combine features
@@ -367,7 +369,7 @@ impl TenVad {
 
 impl std::fmt::Debug for TenVad {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TenVadOnnx")
+        f.debug_struct("TenVad")
             .field("session", &"Session")
             .field("hidden_states", &self.hidden_states.len())
             .field("feature_buffer", &self.feature_buffer.shape())
@@ -817,6 +819,8 @@ mod tests {
     #[test]
     fn test_constants_validity() {
         // Test that constants are reasonable (these help document expected values)
+        // The following lines use `const _: () = assert!(...)` for compile-time assertions.
+        // This idiom causes a compilation error if the assertion fails, ensuring the condition is checked at compile time.
         const _: () = assert!(FFT_SIZE > 0, "FFT_SIZE should be positive");
         const _: () = assert!(WINDOW_SIZE > 0, "WINDOW_SIZE should be positive");
         const _: () = assert!(
@@ -866,7 +870,7 @@ mod tests {
         let debug_str = format!("{vad:?}");
 
         // Debug output should contain key information
-        assert!(debug_str.contains("TenVadOnnx"));
+        assert!(debug_str.contains("TenVad"));
         assert!(debug_str.contains("hidden_states"));
         assert!(debug_str.contains("feature_buffer"));
     }
