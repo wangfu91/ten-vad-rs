@@ -242,9 +242,7 @@ impl TenVad {
         let windowed = &padded * &self.window;
 
         // Zero the FFT buffer before use to clear any previous data (using cached FFT instance and reusable buffer)
-        for elem in &mut self.fft_buffer {
-            *elem = Complex32::new(0.0, 0.0);
-        }
+        self.fft_buffer.fill(Complex32::new(0.0, 0.0));
 
         // Prepare input for FFT (real to complex)
         for i in 0..WINDOW_SIZE.min(FFT_SIZE) {
