@@ -94,13 +94,35 @@ impl TenVad {
             return Err(TenVadError::UnsupportedSampleRate(sample_rate));
         }
 
-        // Create ONNX session
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(1)?
             .with_inter_threads(1)?
             .commit_from_file(onnx_model_path)?;
 
+        Self::from_session(session)
+    }
+
+    /// Create a new TenVad instance from in-memory model bytes.
+    ///
+    /// This uses `commit_from_memory` from the `ort` crate to build the session directly
+    /// from the provided bytes (avoids writing a tempfile).
+    pub fn new_from_bytes(model_bytes: &[u8], sample_rate: u32) -> TenVadResult<Self> {
+        if sample_rate != TARGET_SAMPLE_RATE {
+            return Err(TenVadError::UnsupportedSampleRate(sample_rate));
+        }
+
+        let session = Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(1)?
+            .with_inter_threads(1)?
+            .commit_from_memory(model_bytes)?;
+
+        Self::from_session(session)
+    }
+
+    /// Shared initialization from an already-built `Session`.
+    fn from_session(session: Session) -> TenVadResult<Self> {
         // Initialize hidden states: Vector of 2D arrays [MODEL_IO_NUM - 1] each [1, MODEL_HIDDEN_DIM]
         let mut hidden_states = Vec::new();
         for _ in 0..MODEL_IO_NUM - 1 {
@@ -123,8 +145,6 @@ impl TenVad {
         let mut fft_planner = FftPlanner::new();
         let fft_instance = fft_planner.plan_fft_forward(FFT_SIZE);
         let fft_buffer = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
-
-        log::debug!("Loaded ONNX model: {onnx_model_path}");
 
         Ok(Self {
             session,
