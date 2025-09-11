@@ -2,10 +2,8 @@ name: Publish to crates.io
 
 on:
   push:
-    branches:
-      - master
     tags:
-      - 'v*'  # Trigger on tags matching v*, like v1.0.0
+      - "v*" # Trigger on tags matching v*, like v1.0.0
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,18 +14,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+        with:
+          fetch-depth: 0
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config libssl-dev
-      
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-gnu
-      
+          components: rustfmt, clippy
+
       - name: Cache cargo dependencies
         uses: actions/cache@v4
         with:
@@ -40,10 +41,44 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-      
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Verify tag matches Cargo.toml version
+        env:
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          echo "GITHUB_REF=$GITHUB_REF"
+          TAG=${GITHUB_REF#refs/tags/}
+          if [ -z "$TAG" ]; then
+            echo "No tag found in GITHUB_REF ($GITHUB_REF). Are you sure this workflow was triggered by a tag push?"
+            exit 1
+          fi
+          echo "Tag: $TAG"
+          CRATE_VERSION=$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -n1)
+          if [ -z "$CRATE_VERSION" ]; then
+            echo "Failed to read version from Cargo.toml"
+            exit 1
+          fi
+          echo "Cargo.toml version: $CRATE_VERSION"
+          # Accept tags like v1.2.3 or 1.2.3 to match crate version
+          TAG_STRIPPED=${TAG#v}
+          if [ "$TAG" != "v$CRATE_VERSION" ] && [ "$TAG_STRIPPED" != "$CRATE_VERSION" ]; then
+            echo "Tag ($TAG) does not match Cargo.toml version ($CRATE_VERSION)"
+            exit 1
+          fi
+          echo "Tag matches Cargo.toml version"
+
       - name: Verify package
         run: cargo package
-      
+
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
