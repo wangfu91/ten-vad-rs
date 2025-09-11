@@ -94,11 +94,8 @@ impl TenVad {
             return Err(TenVadError::UnsupportedSampleRate(sample_rate));
         }
 
-        let session = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
-            .with_inter_threads(1)?
-            .commit_from_file(onnx_model_path)?;
+        let builder = Self::configure_session_builder()?;
+        let session = builder.commit_from_file(onnx_model_path)?;
 
         Self::from_session(session)
     }
@@ -112,11 +109,8 @@ impl TenVad {
             return Err(TenVadError::UnsupportedSampleRate(sample_rate));
         }
 
-        let session = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
-            .with_inter_threads(1)?
-            .commit_from_memory(model_bytes)?;
+        let builder = Self::configure_session_builder()?;
+        let session = builder.commit_from_memory(model_bytes)?;
 
         Self::from_session(session)
     }
@@ -156,6 +150,15 @@ impl TenVad {
             fft_instance,
             fft_buffer,
         })
+    }
+
+    /// Configure a common Session builder with project defaults (optimization level and threads).
+    fn configure_session_builder() -> TenVadResult<ort::session::builder::SessionBuilder> {
+        let builder = Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(1)?
+            .with_inter_threads(1)?;
+        Ok(builder)
     }
 
     /// Generate mel filter-bank coefficients(Adapted from aed.cc).
