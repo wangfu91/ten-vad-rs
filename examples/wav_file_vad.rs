@@ -71,7 +71,7 @@ fn process_wav_file(wav_file_path: &str, vad: &mut TenVad) -> anyhow::Result<()>
         match vad.process_frame(&frame) {
             Ok(vad_score) => {
                 if vad_score >= THRESHOLD {
-                    println!("++++++ Voice detected: probability {vad_score:2}");
+                    println!("++++++ Voice detected: probability {vad_score:.2}");
                 } else {
                     println!("----- No voice detected");
                 }
