@@ -16,6 +16,7 @@ fn main() {
     // Ensure the target directory exists
     fs::create_dir_all(&exe_dir).expect("Failed to create target directory");
 
+    // Copy the ONNX model to the target directory
     let target_onnx_model_path = exe_dir.join("ten-vad.onnx");
     fs::copy(&onnx_model_path, &target_onnx_model_path).expect("Failed to copy ten-vad.onnx");
 }

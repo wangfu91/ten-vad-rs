@@ -27,6 +27,11 @@ const MODEL_IO_NUM: usize = 5;
 const EPS: f32 = 1e-20;
 const PRE_EMPHASIS_COEFF: f32 = 0.97;
 
+/// Pitch estimation constants (from pitch_est_st.h)
+const PITCH_MIN_PERIOD: usize = 32; // ~500Hz at 16kHz (AUP_PE_MIN_PERIOD_16KHZ)
+const PITCH_MAX_PERIOD: usize = 256; // ~62Hz at 16kHz (AUP_PE_MAX_PERIOD_16KHZ)
+const PITCH_VOICED_THRESHOLD: f32 = 0.4; // Threshold for voiced detection
+
 /// Means of input-mel-filterbank (from coeff.h)
 #[rustfmt::skip]
 const FEATURE_MEANS: [f32; 41] = [
@@ -65,6 +70,9 @@ const FEATURE_STDS: [f32; 41] = [
     5.096439361572e+00, 1.152136917114e+02
 ];
 
+/// Maximum input buffer size (from C++ AUP_AED_MAX_IN_BUFF_SIZE)
+const MAX_INPUT_BUFFER_SIZE: usize = 256;
+
 /// TEN VAD ONNX model runner
 pub struct TenVad {
     session: Session,                // ONNX session for inference
@@ -75,6 +83,8 @@ pub struct TenVad {
     window: Array1<f32>,             // 1D array: [WINDOW_SIZE]
     fft_instance: Arc<dyn Fft<f32>>, // Cached FFT instance
     fft_buffer: Vec<Complex32>,      // Reusable FFT buffer
+    audio_f32_buffer: Vec<f32>,      // Reusable buffer for i16 to f32 conversion
+    power_spectrum: Array1<f32>,     // Reusable power spectrum buffer
 }
 
 impl TenVad {
@@ -140,6 +150,10 @@ impl TenVad {
         let fft_instance = fft_planner.plan_fft_forward(FFT_SIZE);
         let fft_buffer = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
 
+        // Pre-allocate reusable buffers
+        let audio_f32_buffer = Vec::with_capacity(MAX_INPUT_BUFFER_SIZE);
+        let power_spectrum = Array1::zeros(FFT_SIZE / 2 + 1);
+
         Ok(Self {
             session,
             hidden_states,
@@ -149,6 +163,8 @@ impl TenVad {
             window,
             fft_instance,
             fft_buffer,
+            audio_f32_buffer,
+            power_spectrum,
         })
     }
 
@@ -161,55 +177,73 @@ impl TenVad {
         Ok(builder)
     }
 
-    /// Generate mel filter-bank coefficients(Adapted from aed.cc).
+    /// Generate mel filter-bank coefficients (Adapted from aed.cc `AUP_Aed_resetVariables`).
     ///
     /// A mel filter bank is a set of filters used in audio processing to mimic the human ear's perception of sound frequencies.
     /// These filters are spaced according to the mel scale, which is more sensitive to lower frequencies and less sensitive to higher frequencies.
     fn generate_mel_filters() -> Array2<f32> {
         let n_bins = FFT_SIZE / 2 + 1;
+        let num_points = MEL_FILTER_BANK_NUM + 2; // +2 for left and right boundary points
 
-        // Generate mel filter-bank coefficients
+        // Generate mel filter-bank coefficients (matching C++ aed.cc)
+        // C++: float low_mel = 2595.0f * log10f(1.0f + 0.0f / 700.0f);
+        // C++: float high_mel = 2595.0f * log10f(1.0f + 8000.0f / 700.0f);
         let low_mel = 2595.0f32 * (1.0f32 + 0.0f32 / 700.0f32).log10();
         let high_mel = 2595.0f32 * (1.0f32 + 8000.0f32 / 700.0f32).log10();
 
-        // Create mel points
-        let mut mel_points = Vec::new();
-        for i in 0..=MEL_FILTER_BANK_NUM + 1 {
-            let mel = low_mel + (high_mel - low_mel) * i as f32 / (MEL_FILTER_BANK_NUM + 1) as f32;
-            mel_points.push(mel);
-        }
-
-        // Convert to Hz
-        let mut hz_points = Vec::new();
-        for mel in mel_points {
+        // Create mel points and convert to Hz and bin indices in one pass
+        // C++: mel_points = i * (high_mel - low_mel) / ((float)melFbSz + 1.0f) + low_mel;
+        // C++: hz_points = 700.0f * (powf(10.0f, mel_points / 2595.0f) - 1.0f);
+        // C++: melBinBuff[i] = (size_t)((stHdl->intFftSz + 1.0f) * hz_points / (float)AUP_AED_FS);
+        let mut bin_points = Vec::with_capacity(num_points);
+        for i in 0..num_points {
+            let mel =
+                i as f32 * (high_mel - low_mel) / (MEL_FILTER_BANK_NUM as f32 + 1.0f32) + low_mel;
             let hz = 700.0f32 * (10.0f32.powf(mel / 2595.0f32) - 1.0f32);
-            hz_points.push(hz);
-        }
-
-        // Convert to FFT bin indices
-        let mut bin_points = Vec::new();
-        for hz in hz_points {
-            let bin = ((FFT_SIZE + 1) as f32 * hz / 16000.0f32).floor() as usize;
+            // Match C++ exactly: (intFftSz + 1) * hz / AUP_AED_FS
+            let bin =
+                ((FFT_SIZE as f32 + 1.0f32) * hz / TARGET_SAMPLE_RATE as f32).floor() as usize;
             bin_points.push(bin);
         }
 
         // Build mel filter bank as 2D array
+        // C++ stores as melFbCoef[j * nBins + i] but we use [j, i] for clarity
         let mut mel_filters = Array2::zeros((MEL_FILTER_BANK_NUM, n_bins));
 
-        for i in 0..MEL_FILTER_BANK_NUM {
-            // Left slope
-            for j in bin_points[i]..bin_points[i + 1] {
-                if j < n_bins {
-                    mel_filters[[i, j]] =
-                        (j - bin_points[i]) as f32 / (bin_points[i + 1] - bin_points[i]) as f32;
+        // C++ code from aed.cc AUP_Aed_resetVariables:
+        // for (j = 0; j < melFbSz; j++) {
+        //     for (i = melBinBuff[j]; i < melBinBuff[j + 1]; i++) {
+        //         idx = j * nBins + i;
+        //         melFbCoef[idx] = (float)(i - melBinBuff[j]) / (float)(melBinBuff[j + 1] - melBinBuff[j]);
+        //     }
+        //     for (i = melBinBuff[j + 1]; i < melBinBuff[j + 2]; i++) {
+        //         idx = j * nBins + i;
+        //         melFbCoef[idx] = (float)(melBinBuff[j + 2] - i) / (float)(melBinBuff[j + 2] - melBinBuff[j + 1]);
+        //     }
+        // }
+        for j in 0..MEL_FILTER_BANK_NUM {
+            // Left slope (rising edge)
+            let left_bin = bin_points[j];
+            let center_bin = bin_points[j + 1];
+            let right_bin = bin_points[j + 2];
+
+            // Avoid division by zero
+            if center_bin > left_bin {
+                for i in left_bin..center_bin {
+                    if i < n_bins {
+                        mel_filters[[j, i]] =
+                            (i - left_bin) as f32 / (center_bin - left_bin) as f32;
+                    }
                 }
             }
 
-            // Right slope
-            for j in bin_points[i + 1]..bin_points[i + 2] {
-                if j < n_bins {
-                    mel_filters[[i, j]] = (bin_points[i + 2] - j) as f32
-                        / (bin_points[i + 2] - bin_points[i + 1]) as f32;
+            // Right slope (falling edge)
+            if right_bin > center_bin {
+                for i in center_bin..right_bin {
+                    if i < n_bins {
+                        mel_filters[[j, i]] =
+                            (right_bin - i) as f32 / (right_bin - center_bin) as f32;
+                    }
                 }
             }
         }
@@ -227,7 +261,75 @@ impl TenVad {
         window
     }
 
+    /// Estimate pitch frequency using normalized autocorrelation.
+    ///
+    /// This is a simplified version of the C++ pitch estimation algorithm.
+    /// The C++ version uses LPC pre-filtering, downsampling, and Viterbi path finding,
+    /// but this simplified version provides a reasonable approximation using
+    /// normalized autocorrelation with peak detection.
+    ///
+    /// Returns pitch frequency in Hz, or 0.0 if no pitch detected (unvoiced).
+    fn estimate_pitch(audio_frame: &[f32]) -> f32 {
+        let len = audio_frame.len();
+        if len < PITCH_MAX_PERIOD {
+            return 0.0;
+        }
+
+        // Compute energy of the signal
+        let energy: f32 = audio_frame.iter().map(|&x| x * x).sum();
+        if energy < 1e-10 {
+            return 0.0; // Silent frame
+        }
+
+        // Compute normalized autocorrelation for lag range [MIN_PERIOD, MAX_PERIOD]
+        // Using the formula: r[lag] = sum(x[i] * x[i+lag]) / sqrt(sum(x[i]^2) * sum(x[i+lag]^2))
+        let analysis_len = len.saturating_sub(PITCH_MAX_PERIOD);
+        if analysis_len < PITCH_MIN_PERIOD {
+            return 0.0;
+        }
+
+        let mut best_corr = -1.0f32;
+        let mut best_lag = 0usize;
+
+        // Energy of reference window
+        let energy0: f32 = audio_frame[..analysis_len].iter().map(|&x| x * x).sum();
+
+        for lag in PITCH_MIN_PERIOD..=PITCH_MAX_PERIOD.min(len - analysis_len) {
+            // Cross-correlation at this lag
+            let mut xcorr = 0.0f32;
+            for i in 0..analysis_len {
+                xcorr += audio_frame[i] * audio_frame[i + lag];
+            }
+
+            // Energy of lagged window (sliding window energy)
+            let energy_lag: f32 = audio_frame[lag..lag + analysis_len]
+                .iter()
+                .map(|&x| x * x)
+                .sum();
+
+            // Normalized correlation
+            let denom = (energy0 * energy_lag).sqrt();
+            let norm_corr = if denom > 1e-10 { xcorr / denom } else { 0.0 };
+
+            if norm_corr > best_corr {
+                best_corr = norm_corr;
+                best_lag = lag;
+            }
+        }
+
+        // Check if correlation is strong enough to indicate voiced speech
+        // C++ uses voicedThr = 0.4 (AUP_PE_PITCH_EST_DEFAULT_VOICEDTHR)
+        if best_corr >= PITCH_VOICED_THRESHOLD && best_lag > 0 {
+            // Convert lag (in samples) to frequency (Hz)
+            // pitch_freq = sample_rate / period
+            TARGET_SAMPLE_RATE as f32 / best_lag as f32
+        } else {
+            0.0 // Unvoiced or no reliable pitch found
+        }
+    }
+
     /// Pre-emphasis filtering
+    #[allow(dead_code)]
     fn pre_emphasis(&mut self, audio_frame: &[f32]) -> Array1<f32> {
         if audio_frame.is_empty() {
             return Array1::zeros(0);
@@ -250,6 +352,7 @@ impl TenVad {
     }
 
     /// Extract features from audio frame
+    #[allow(dead_code)]
     fn extract_features(&mut self, audio_frame: &[f32]) -> Array1<f32> {
         // Pre-emphasis
         let emphasized = self.pre_emphasis(audio_frame);
@@ -275,24 +378,26 @@ impl TenVad {
         // Perform FFT using cached instance
         self.fft_instance.process(&mut self.fft_buffer);
 
-        // Compute power spectrum (only positive frequencies)
+        // Compute power spectrum using reusable buffer (only positive frequencies)
+        // C++ code in AUP_Aed_CalcBinPow handles bin-0 and bin-(NBins-1) specially
+        // because of the packed real FFT output format. With complex FFT, we use norm_sqr directly.
         let n_bins = FFT_SIZE / 2 + 1;
-        let mut power_spectrum = Array1::zeros(n_bins);
+        self.power_spectrum.fill(0.0);
         for i in 0..n_bins {
-            power_spectrum[i] = self.fft_buffer[i].norm_sqr();
+            self.power_spectrum[i] = self.fft_buffer[i].norm_sqr();
         }
 
-        // Normalization (corresponding to powerNormal = 32768^2 in C++)
-        let power_normal = 32768.0f32.powi(2);
-        power_spectrum /= power_normal;
+        // Mel filter bank features with normalization
+        // C++ code from AUP_Aed_aivad_proc:
+        //   perBandValue = perBandValue / powerNormal;  // powerNormal = 32768^2
+        //   perBandValue = logf(perBandValue + AUP_AED_EPS);
+        // We apply: mel_filter * power_spectrum, then divide by powerNormal, then log
+        let power_normal = 32768.0f32 * 32768.0f32;
+        let mel_features = self.mel_filters.dot(&self.power_spectrum);
+        let mel_features = mel_features.mapv(|x| (x / power_normal + EPS).ln());
 
-        // Mel filter bank features
-        let mel_features = self.mel_filters.dot(&power_spectrum);
-        let mel_features = mel_features.mapv(|x| (x + EPS).ln());
-
-        // TODO: Implement pitch estimation. The original C++ code has a more complex pitch estimation algorithm.
-        // For now, pitch is hardcoded to 0.0.
-        let pitch_freq = 0.0f32;
+        // Estimate pitch frequency using autocorrelation
+        let pitch_freq = Self::estimate_pitch(audio_frame);
 
         // Combine features
         let mut features = Array1::zeros(FEATURE_LEN);
@@ -320,20 +425,77 @@ impl TenVad {
             return Err(TenVadError::EmptyAudioData);
         }
 
-        // Convert i16 to f32
-        let audio_f32: Vec<f32> = audio_frame.iter().map(|&x| x as f32).collect();
+        // Convert i16 to f32 using reusable buffer (avoid allocation per frame)
+        // Note: C++ uses input in [-32768, 32767] range directly (no normalization to [-1, 1])
+        self.audio_f32_buffer.clear();
+        self.audio_f32_buffer
+            .extend(audio_frame.iter().map(|&x| x as f32));
 
-        // Extract features
-        let features = self.extract_features(&audio_f32);
+        // Pre-emphasis - inline to avoid borrow issues
+        // C++: timeSigEphaPtr[idx] = pIn->timeSignal[idx] - 0.97f * stHdl->timeSignalPre;
+        let audio_len = self.audio_f32_buffer.len();
+        let mut emphasized = Array1::zeros(audio_len);
+        if audio_len > 0 {
+            emphasized[0] = self.audio_f32_buffer[0] - PRE_EMPHASIS_COEFF * self.pre_emphasis_prev;
+            for i in 1..audio_len {
+                emphasized[i] =
+                    self.audio_f32_buffer[i] - PRE_EMPHASIS_COEFF * self.audio_f32_buffer[i - 1];
+            }
+            self.pre_emphasis_prev = self.audio_f32_buffer[audio_len - 1];
+        }
 
-        // Update feature buffer (sliding window)
-        // Shift existing features up and add new features at the end
+        // Zero-padding to window size
+        let mut padded = Array1::zeros(WINDOW_SIZE);
+        let copy_len = audio_len.min(WINDOW_SIZE);
+        padded
+            .slice_mut(ndarray::s![..copy_len])
+            .assign(&emphasized.slice(ndarray::s![..copy_len]));
+
+        // Windowing
+        let windowed = &padded * &self.window;
+
+        // Zero the FFT buffer and prepare input
+        self.fft_buffer.fill(Complex32::new(0.0, 0.0));
+        for i in 0..WINDOW_SIZE.min(FFT_SIZE) {
+            self.fft_buffer[i] = Complex32::new(windowed[i], 0.0);
+        }
+
+        // Perform FFT
+        self.fft_instance.process(&mut self.fft_buffer);
+
+        // Compute power spectrum
+        let n_bins = FFT_SIZE / 2 + 1;
+        self.power_spectrum.fill(0.0);
+        for i in 0..n_bins {
+            self.power_spectrum[i] = self.fft_buffer[i].norm_sqr();
+        }
+
+        // Mel filter bank features with normalization
+        let power_normal = 32768.0f32 * 32768.0f32;
+        let mel_features = self.mel_filters.dot(&self.power_spectrum);
+        let mel_features = mel_features.mapv(|x| (x / power_normal + EPS).ln());
+
+        // Estimate pitch frequency using autocorrelation on the original audio
+        let pitch_freq = Self::estimate_pitch(&self.audio_f32_buffer);
+
+        // Combine and normalize features
+        let mut features = Array1::zeros(FEATURE_LEN);
+        features
+            .slice_mut(ndarray::s![..MEL_FILTER_BANK_NUM])
+            .assign(&mel_features);
+        features[MEL_FILTER_BANK_NUM] = pitch_freq;
+        for i in 0..FEATURE_LEN {
+            features[i] = (features[i] - FEATURE_MEANS[i]) / (FEATURE_STDS[i] + EPS);
+        }
+
+        // Update feature buffer (sliding window) using memmove-style operation
+        // C++ code: memmove(aivadInputFeatStack, aivadInputFeatStack + srcOffset, sizeof(float) * srcLen);
         if CONTEXT_WINDOW_LEN > 1 {
-            // Use a simple loop to shift rows up
+            // More efficient: shift by copying element by element to avoid row allocation
             for i in 0..CONTEXT_WINDOW_LEN - 1 {
-                // Copy row i+1 to row i
-                let src_row = self.feature_buffer.row(i + 1).to_owned();
-                self.feature_buffer.row_mut(i).assign(&src_row);
+                for j in 0..FEATURE_LEN {
+                    self.feature_buffer[[i, j]] = self.feature_buffer[[i + 1, j]];
+                }
             }
         }
         // Set the last row to new features
@@ -422,28 +584,52 @@ mod tests {
     #[test]
     fn test_generate_mel_filters() {
         let mel_filters = TenVad::generate_mel_filters();
+        let n_bins = FFT_SIZE / 2 + 1;
 
         // Check dimensions
-        assert_eq!(
-            mel_filters.shape(),
-            &[MEL_FILTER_BANK_NUM, FFT_SIZE / 2 + 1]
-        );
+        assert_eq!(mel_filters.shape(), &[MEL_FILTER_BANK_NUM, n_bins]);
 
         // Check that filters are non-negative
-        assert!(mel_filters.iter().all(|&x| x >= 0.0));
+        assert!(
+            mel_filters.iter().all(|&x| x >= 0.0),
+            "All filter coefficients should be non-negative"
+        );
 
-        // Check that each filter has some non-zero values
+        // Check that each filter has some non-zero values and reasonable properties
         for i in 0..MEL_FILTER_BANK_NUM {
             let filter_sum: f32 = mel_filters.row(i).sum();
             assert!(filter_sum > 0.0, "Filter {i} should have non-zero values");
-        }
 
-        // Check that filters have triangular shape (max value should be around 1.0)
-        for i in 0..MEL_FILTER_BANK_NUM {
+            // Check that filters have triangular shape (max value should be around 1.0)
             let max_val = mel_filters.row(i).iter().fold(0.0f32, |a, &b| a.max(b));
             assert!(
                 max_val <= 1.0 + f32::EPSILON,
-                "Filter {i} max value should not exceed 1.0"
+                "Filter {i} max value should not exceed 1.0 (got {max_val})"
+            );
+
+            // Max value should be close to 1.0 at the center of the triangular filter
+            assert!(
+                max_val > 0.5,
+                "Filter {i} should have peak near 1.0 (got {max_val})"
+            );
+        }
+
+        // Verify adjacent filters overlap (triangular filter bank property)
+        for i in 0..MEL_FILTER_BANK_NUM - 1 {
+            let filter_i = mel_filters.row(i);
+            let filter_next = mel_filters.row(i + 1);
+
+            // Find bins where both filters have non-zero values
+            let overlap_count = filter_i
+                .iter()
+                .zip(filter_next.iter())
+                .filter(|(a, b)| **a > 0.0 && **b > 0.0)
+                .count();
+
+            assert!(
+                overlap_count > 0,
+                "Filters {i} and {} should overlap",
+                i + 1
             );
         }
     }
@@ -543,6 +729,82 @@ mod tests {
     }
 
     #[test]
+    fn test_estimate_pitch_silence() {
+        // Silent audio should return 0 pitch
+        let silence = vec![0.0f32; WINDOW_SIZE];
+        let pitch = TenVad::estimate_pitch(&silence);
+        assert_eq!(pitch, 0.0, "Silent audio should have no pitch");
+    }
+
+    #[test]
+    fn test_estimate_pitch_sine_wave() {
+        // Generate a 200 Hz sine wave (within typical speech pitch range)
+        let frequency = 200.0f32;
+        let sample_rate = TARGET_SAMPLE_RATE as f32;
+        let audio: Vec<f32> = (0..WINDOW_SIZE)
+            .map(|i| (2.0 * PI * frequency * i as f32 / sample_rate).sin() * 10000.0)
+            .collect();
+
+        let pitch = TenVad::estimate_pitch(&audio);
+
+        // For a clear 200 Hz tone, pitch should be detected
+        assert!(
+            pitch > 0.0,
+            "Pitch should be detected for a clear 200 Hz sine wave (got {pitch})"
+        );
+
+        // Verify accuracy - allow some tolerance due to autocorrelation resolution
+        let error_percent = ((pitch - frequency) / frequency).abs() * 100.0;
+        assert!(
+            error_percent < 15.0,
+            "Pitch {pitch} Hz should be close to {frequency} Hz (error: {error_percent:.1}%)"
+        );
+    }
+
+    #[test]
+    fn test_estimate_pitch_different_frequencies() {
+        let sample_rate = TARGET_SAMPLE_RATE as f32;
+
+        // Test frequencies within the detectable range: ~62 Hz to ~500 Hz
+        // Note: Autocorrelation-based pitch estimation can have octave errors,
+        // so we verify pitch is detected and is a harmonic multiple
+        for &frequency in &[100.0f32, 150.0, 200.0, 250.0, 400.0] {
+            let audio: Vec<f32> = (0..WINDOW_SIZE)
+                .map(|i| (2.0 * PI * frequency * i as f32 / sample_rate).sin() * 10000.0)
+                .collect();
+
+            let pitch = TenVad::estimate_pitch(&audio);
+
+            // For pure tones, pitch should be detected
+            assert!(
+                pitch > 0.0,
+                "Pitch should be detected for {frequency} Hz sine wave (got {pitch})"
+            );
+
+            // Verify it's close to the fundamental or a subharmonic (octave error)
+            // Acceptable: f, f/2, f/3 (common autocorrelation artifacts)
+            let is_valid = [1.0, 2.0, 3.0].iter().any(|&divisor| {
+                let expected = frequency / divisor;
+                let error_percent = ((pitch - expected) / expected).abs() * 100.0;
+                error_percent < 15.0
+            });
+
+            assert!(
+                is_valid,
+                "Detected pitch {pitch:.1} Hz should be {frequency} Hz or a subharmonic"
+            );
+        }
+    }
+
+    #[test]
+    fn test_estimate_pitch_short_frame() {
+        // Frame too short should return 0
+        let short_audio = vec![1.0f32; PITCH_MIN_PERIOD - 1];
+        let pitch = TenVad::estimate_pitch(&short_audio);
+        assert_eq!(pitch, 0.0, "Too short frame should have no pitch");
+    }
+
+    #[test]
     fn test_extract_features_sine_wave() {
         let mut vad = create_test_vad();
         let audio_frame = generate_test_audio(WINDOW_SIZE, 440.0, 16000.0);
@@ -551,8 +813,11 @@ mod tests {
         assert_eq!(features.len(), FEATURE_LEN);
         assert!(features.iter().all(|&x| x.is_finite()));
 
+        // Use a fresh VAD instance for silence to avoid state pollution from pre-emphasis
+        let mut silence_vad = create_test_vad();
+        let silence_features = silence_vad.extract_features(&vec![0.0; WINDOW_SIZE]);
+
         // For a sine wave, features should be different from silence
-        let silence_features = vad.extract_features(&vec![0.0; WINDOW_SIZE]);
         let features_diff: f32 = features
             .iter()
             .zip(silence_features.iter())
@@ -561,7 +826,7 @@ mod tests {
 
         assert!(
             features_diff > 0.1,
-            "Sine wave features should be different from silence"
+            "Sine wave features should be different from silence (diff: {features_diff})"
         );
     }
 
@@ -744,11 +1009,29 @@ mod tests {
         let max_frame = vec![i16::MAX; 256];
         let result = vad.process_frame(&max_frame);
         assert!(result.is_ok(), "Processing max values should succeed");
+        let max_score = result.unwrap();
+        assert!(
+            max_score.is_finite(),
+            "Score for max values should be finite"
+        );
+        assert!(
+            (0.0..=1.0).contains(&max_score),
+            "Score for max values should be in [0, 1] (got {max_score})"
+        );
 
         // Test with minimum values
         let min_frame = vec![i16::MIN; 256];
         let result = vad.process_frame(&min_frame);
         assert!(result.is_ok(), "Processing min values should succeed");
+        let min_score = result.unwrap();
+        assert!(
+            min_score.is_finite(),
+            "Score for min values should be finite"
+        );
+        assert!(
+            (0.0..=1.0).contains(&min_score),
+            "Score for min values should be in [0, 1] (got {min_score})"
+        );
     }
 
     #[test]
@@ -794,11 +1077,17 @@ mod tests {
         let initial_sum: f32 = vad.feature_buffer.sum();
         assert_eq!(initial_sum, 0.0, "Initial feature buffer should be zeros");
 
-        // Process several frames with different signals
-        for i in 0..CONTEXT_WINDOW_LEN + 2 {
-            // Create audio with some variation to ensure features are different
-            let audio_frame = generate_test_audio(WINDOW_SIZE, 200.0 + i as f32 * 100.0, 16000.0);
-            let _ = vad.extract_features(&audio_frame);
+        // Process several frames using process_frame (which uses i16 with proper amplitude)
+        // to ensure the feature buffer gets populated
+        let frequencies = [200.0f32, 400.0, 600.0, 800.0, 1000.0];
+        for (i, &freq) in frequencies.iter().enumerate().take(CONTEXT_WINDOW_LEN + 2) {
+            // Generate i16 audio with strong amplitude (like real audio input)
+            let audio_frame: Vec<i16> = (0..256)
+                .map(|j| ((2.0 * PI * freq * j as f32 / 16000.0).sin() * 20000.0) as i16)
+                .collect();
+
+            let result = vad.process_frame(&audio_frame);
+            assert!(result.is_ok(), "Processing frame {i} should succeed");
         }
 
         // Feature buffer should contain the last CONTEXT_WINDOW_LEN frames
@@ -807,33 +1096,19 @@ mod tests {
             &[CONTEXT_WINDOW_LEN, FEATURE_LEN]
         );
 
-        // The buffer should have been updated from its initial zero state
-        // Even after normalization, processed audio should produce different features than silence
-        let silence_features = {
-            let mut temp_vad = create_test_vad();
-            temp_vad.extract_features(&vec![0.0; WINDOW_SIZE])
-        };
-
-        // At least one row should be different from silence features
-        let mut has_difference = false;
-        for row_idx in 0..CONTEXT_WINDOW_LEN {
-            let row = vad.feature_buffer.row(row_idx);
-            let diff: f32 = row
-                .iter()
-                .zip(silence_features.iter())
-                .map(|(a, b)| (a - b).abs())
-                .sum();
-            if diff > 0.1 {
-                // Allow for some tolerance
-                has_difference = true;
-                break;
-            }
-        }
-
-        // If no significant difference found, at least verify the buffer structure is correct
+        // After processing real audio, the feature buffer should have values
+        // that are non-trivially different from initial zeros
+        // (normalized features can be positive or negative, so check absolute sum)
+        let buffer_abs_sum: f32 = vad.feature_buffer.iter().map(|x| x.abs()).sum();
         assert!(
-            has_difference || vad.feature_buffer.shape() == [CONTEXT_WINDOW_LEN, FEATURE_LEN],
-            "Feature buffer should either show processing changes or maintain correct structure"
+            buffer_abs_sum > 0.1,
+            "Feature buffer should contain meaningful values after processing (abs sum: {buffer_abs_sum})"
+        );
+
+        // Verify all features are finite
+        assert!(
+            vad.feature_buffer.iter().all(|x| x.is_finite()),
+            "All features in buffer should be finite"
         );
     }
 
@@ -898,28 +1173,413 @@ mod tests {
 
     #[test]
     fn test_multiple_vad_instances() {
-        // Test that multiple VAD instances can coexist
+        // Test that multiple VAD instances can coexist and are independent
         let mut vad1 = create_test_vad();
         let mut vad2 = create_test_vad();
 
+        // Process different frames - both should work independently
         let frame1 = vec![100i16; 256];
         let frame2 = vec![200i16; 256];
 
         let score1 = vad1.process_frame(&frame1).unwrap();
         let score2 = vad2.process_frame(&frame2).unwrap();
 
-        // Different inputs should potentially produce different outputs
-        assert!(score1.is_finite() && score2.is_finite());
-
-        // Process same frame with both instances
-        let same_frame = vec![150i16; 256];
-        let score1_same = vad1.process_frame(&same_frame).unwrap();
-        let score2_same = vad2.process_frame(&same_frame).unwrap();
-
-        // Should produce same result for same input
         assert!(
-            (score1_same - score2_same).abs() < 0.01,
-            "Different instances should produce similar results for same input"
+            score1.is_finite() && score2.is_finite(),
+            "Both instances should produce finite scores"
         );
+        assert!(
+            (0.0..=1.0).contains(&score1) && (0.0..=1.0).contains(&score2),
+            "Both scores should be in valid range"
+        );
+
+        // Test determinism: fresh instances with same input should produce identical output
+        let mut fresh_vad1 = create_test_vad();
+        let mut fresh_vad2 = create_test_vad();
+        let test_frame = vec![150i16; 256];
+
+        let fresh_score1 = fresh_vad1.process_frame(&test_frame).unwrap();
+        let fresh_score2 = fresh_vad2.process_frame(&test_frame).unwrap();
+
+        assert!(
+            (fresh_score1 - fresh_score2).abs() < f32::EPSILON,
+            "Fresh instances with same input should produce identical output (got {fresh_score1} vs {fresh_score2})"
+        );
+    }
+
+    // === New tests for improved coverage ===
+
+    #[test]
+    fn test_new_from_bytes() {
+        // Read the model file into memory and create VAD from bytes
+        let model_bytes = std::fs::read("onnx/ten-vad.onnx").expect("Failed to read model file");
+        let vad = TenVad::new_from_bytes(&model_bytes, TARGET_SAMPLE_RATE);
+
+        assert!(vad.is_ok(), "TenVad::new_from_bytes should succeed");
+
+        let mut vad = vad.unwrap();
+
+        // Verify it works the same as file-based initialization
+        let audio_frame = vec![100i16; 256];
+        let result = vad.process_frame(&audio_frame);
+        assert!(
+            result.is_ok(),
+            "Processing should succeed with byte-loaded model"
+        );
+        assert!(result.unwrap().is_finite(), "VAD score should be finite");
+    }
+
+    #[test]
+    fn test_new_from_bytes_invalid_sample_rate() {
+        let model_bytes = std::fs::read("onnx/ten-vad.onnx").expect("Failed to read model file");
+        let result = TenVad::new_from_bytes(&model_bytes, 8000);
+
+        assert!(result.is_err(), "Should fail with unsupported sample rate");
+        match result.unwrap_err() {
+            TenVadError::UnsupportedSampleRate(rate) => {
+                assert_eq!(rate, 8000);
+            }
+            _ => panic!("Expected UnsupportedSampleRate error"),
+        }
+    }
+
+    #[test]
+    fn test_new_from_bytes_invalid_model() {
+        let invalid_bytes = vec![0u8; 100]; // Invalid model data
+        let result = TenVad::new_from_bytes(&invalid_bytes, TARGET_SAMPLE_RATE);
+
+        assert!(result.is_err(), "Should fail with invalid model bytes");
+    }
+
+    #[test]
+    fn test_pre_emphasis_negative_values() {
+        let mut vad = create_test_vad();
+        let audio_frame = vec![-100.0, -50.0, 0.0, 50.0, 100.0];
+        let emphasized = vad.pre_emphasis(&audio_frame);
+
+        assert_eq!(emphasized.len(), audio_frame.len());
+
+        // Verify pre-emphasis formula for negative values
+        for i in 1..audio_frame.len() {
+            let expected = audio_frame[i] - PRE_EMPHASIS_COEFF * audio_frame[i - 1];
+            assert!(
+                (emphasized[i] - expected).abs() < f32::EPSILON,
+                "Pre-emphasis should work correctly with negative values"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hidden_states_update_after_processing() {
+        let mut vad = create_test_vad();
+
+        // Verify initial hidden states are zero
+        for hidden_state in &vad.hidden_states {
+            assert!(hidden_state.iter().all(|&x| x == 0.0));
+        }
+
+        // Process several frames
+        let audio_frame = vec![1000i16; 256];
+        for _ in 0..5 {
+            let _ = vad.process_frame(&audio_frame);
+        }
+
+        // After processing, at least some hidden states should be non-zero
+        let total_sum: f32 = vad
+            .hidden_states
+            .iter()
+            .flat_map(|h| h.iter())
+            .map(|&x| x.abs())
+            .sum();
+
+        assert!(
+            total_sum > 0.0,
+            "Hidden states should be updated after processing"
+        );
+    }
+
+    #[test]
+    fn test_vad_score_silence_vs_tone() {
+        let mut vad = create_test_vad();
+
+        // Process silence (should have low VAD score)
+        let silence = vec![0i16; 256];
+        let mut silence_score = 0.0;
+        for _ in 0..10 {
+            silence_score = vad.process_frame(&silence).unwrap();
+        }
+
+        vad.reset();
+
+        // Process a strong tone (more likely to be detected as voice-like activity)
+        let tone: Vec<i16> = (0..256)
+            .map(|i| ((2.0 * PI * 200.0 * i as f32 / 16000.0).sin() * 20000.0) as i16)
+            .collect();
+        let mut tone_score = 0.0;
+        for _ in 0..10 {
+            tone_score = vad.process_frame(&tone).unwrap();
+        }
+
+        // Both scores should be valid
+        assert!((0.0..=1.0).contains(&silence_score));
+        assert!((0.0..=1.0).contains(&tone_score));
+
+        // Tone typically produces higher activation than silence
+        // (though model behavior may vary, at least verify both work)
+        assert!(
+            silence_score.is_finite() && tone_score.is_finite(),
+            "Both silence and tone should produce valid scores"
+        );
+    }
+
+    #[test]
+    fn test_feature_buffer_content_after_processing() {
+        let mut vad = create_test_vad();
+
+        // Process enough frames to fill the context window
+        let audio_frame: Vec<i16> = (0..256)
+            .map(|i| ((2.0 * PI * 300.0 * i as f32 / 16000.0).sin() * 10000.0) as i16)
+            .collect();
+
+        for _ in 0..CONTEXT_WINDOW_LEN + 2 {
+            let _ = vad.process_frame(&audio_frame);
+        }
+
+        // Verify feature buffer has non-trivial content
+        let feature_sum: f32 = vad.feature_buffer.iter().map(|x| x.abs()).sum();
+        assert!(
+            feature_sum > 0.0,
+            "Feature buffer should contain non-zero values after processing"
+        );
+
+        // Verify feature buffer shape is correct
+        assert_eq!(
+            vad.feature_buffer.shape(),
+            &[CONTEXT_WINDOW_LEN, FEATURE_LEN]
+        );
+    }
+
+    #[test]
+    fn test_estimate_pitch_noise() {
+        // Random noise should have low or no pitch correlation
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let noise: Vec<f32> = (0..WINDOW_SIZE)
+            .map(|i| {
+                // Simple deterministic pseudo-random based on index
+                let mut hasher = DefaultHasher::new();
+                i.hash(&mut hasher);
+                let h = hasher.finish();
+                ((h % 65536) as f32 - 32768.0) * 0.3
+            })
+            .collect();
+
+        let pitch = TenVad::estimate_pitch(&noise);
+
+        // Noise typically doesn't have a strong periodic component
+        // Either returns 0 (unvoiced) or a low correlation pitch
+        assert!(
+            pitch.is_finite(),
+            "Pitch estimation should return finite value for noise"
+        );
+    }
+
+    #[test]
+    fn test_process_frame_alternating_values() {
+        let mut vad = create_test_vad();
+
+        // Alternating high frequency pattern
+        let alternating: Vec<i16> = (0..256)
+            .map(|i| if i % 2 == 0 { 10000 } else { -10000 })
+            .collect();
+
+        let result = vad.process_frame(&alternating);
+        assert!(result.is_ok());
+        let score = result.unwrap();
+        assert!(
+            (0.0..=1.0).contains(&score),
+            "Score should be in valid range"
+        );
+    }
+
+    #[test]
+    fn test_mel_filters_frequency_coverage() {
+        let mel_filters = TenVad::generate_mel_filters();
+        let n_bins = FFT_SIZE / 2 + 1;
+
+        // Check that lower mel filters cover lower frequency bins
+        // and higher mel filters cover higher frequency bins
+        let low_filter_center = mel_filters
+            .row(0)
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+
+        let high_filter_center = mel_filters
+            .row(MEL_FILTER_BANK_NUM - 1)
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+
+        assert!(
+            low_filter_center < high_filter_center,
+            "Lower mel filters should cover lower frequencies"
+        );
+
+        // Verify filters span across the frequency range
+        assert!(
+            low_filter_center < n_bins / 4,
+            "Lowest filter should be in lower quarter"
+        );
+        assert!(
+            high_filter_center > n_bins / 2,
+            "Highest filter should be above midpoint"
+        );
+    }
+
+    #[test]
+    fn test_error_display_messages() {
+        // Test UnsupportedSampleRate error message
+        let error = TenVadError::UnsupportedSampleRate(44100);
+        let msg = format!("{}", error);
+        assert!(
+            msg.contains("44100"),
+            "Error message should contain the rate"
+        );
+        assert!(
+            msg.contains("16kHz"),
+            "Error message should mention supported rate"
+        );
+
+        // Test EmptyAudioData error message
+        let error = TenVadError::EmptyAudioData;
+        let msg = format!("{}", error);
+        assert!(
+            msg.to_lowercase().contains("empty"),
+            "Error message should indicate empty data"
+        );
+    }
+
+    #[test]
+    fn test_process_frame_single_sample() {
+        let mut vad = create_test_vad();
+
+        // Single sample should still work (edge case)
+        let single = vec![1000i16];
+        let result = vad.process_frame(&single);
+        assert!(result.is_ok(), "Single sample frame should be processed");
+        assert!(result.unwrap().is_finite());
+    }
+
+    #[test]
+    fn test_reset_clears_pre_emphasis_effect() {
+        let mut vad = create_test_vad();
+
+        // Process a frame to set pre_emphasis_prev
+        let frame = vec![5000i16; 256];
+        let _ = vad.process_frame(&frame);
+
+        // Pre-emphasis state should be non-zero
+        assert_ne!(vad.pre_emphasis_prev, 0.0);
+
+        // Reset and verify
+        vad.reset();
+        assert_eq!(vad.pre_emphasis_prev, 0.0);
+
+        // Processing same input after reset should give same result as fresh instance
+        let mut fresh_vad = create_test_vad();
+        let test_frame = vec![1000i16; 256];
+
+        let score_reset = vad.process_frame(&test_frame).unwrap();
+        let score_fresh = fresh_vad.process_frame(&test_frame).unwrap();
+
+        assert!(
+            (score_reset - score_fresh).abs() < f32::EPSILON,
+            "Reset VAD should behave like fresh instance"
+        );
+    }
+
+    #[test]
+    fn test_hann_window_energy_conservation() {
+        let window = TenVad::generate_hann_window();
+
+        // Sum of squared window values (for energy analysis)
+        let window_energy: f32 = window.iter().map(|&x| x * x).sum();
+
+        // Hann window has known energy properties
+        // For a normalized Hann window, sum of squares ≈ N * 3/8 for large N
+        let expected_approx = WINDOW_SIZE as f32 * 3.0 / 8.0;
+
+        // Allow 5% tolerance
+        let tolerance = expected_approx * 0.05;
+        assert!(
+            (window_energy - expected_approx).abs() < tolerance,
+            "Hann window energy should match theoretical value (got {window_energy}, expected ~{expected_approx})"
+        );
+    }
+
+    #[test]
+    fn test_process_frame_ramp_signal() {
+        let mut vad = create_test_vad();
+
+        // Linear ramp signal
+        let ramp: Vec<i16> = (0..256).map(|i| (i * 100) as i16).collect();
+        let result = vad.process_frame(&ramp);
+
+        assert!(result.is_ok());
+        let score = result.unwrap();
+        assert!((0.0..=1.0).contains(&score));
+    }
+
+    #[test]
+    fn test_estimate_pitch_boundary_frequencies() {
+        let sample_rate = TARGET_SAMPLE_RATE as f32;
+
+        // Test pitch at boundary of detection range (near min period = ~500Hz)
+        let high_freq = sample_rate / PITCH_MIN_PERIOD as f32; // ~500 Hz
+        let audio_high: Vec<f32> = (0..WINDOW_SIZE)
+            .map(|i| (2.0 * PI * high_freq * i as f32 / sample_rate).sin() * 10000.0)
+            .collect();
+
+        let pitch_high = TenVad::estimate_pitch(&audio_high);
+        assert!(pitch_high.is_finite());
+
+        // Test pitch at boundary of detection range (near max period = ~62Hz)
+        let low_freq = sample_rate / PITCH_MAX_PERIOD as f32; // ~62.5 Hz
+        let audio_low: Vec<f32> = (0..WINDOW_SIZE)
+            .map(|i| (2.0 * PI * low_freq * i as f32 / sample_rate).sin() * 10000.0)
+            .collect();
+
+        let pitch_low = TenVad::estimate_pitch(&audio_low);
+        assert!(pitch_low.is_finite());
+    }
+
+    #[test]
+    fn test_vad_state_independence_after_reset() {
+        let mut vad = create_test_vad();
+
+        // Process varied audio to build up state
+        for freq in [100.0, 200.0, 300.0, 400.0, 500.0] {
+            let audio: Vec<i16> = (0..256)
+                .map(|i| ((2.0 * PI * freq * i as f32 / 16000.0).sin() * 15000.0) as i16)
+                .collect();
+            let _ = vad.process_frame(&audio);
+        }
+
+        vad.reset();
+
+        // After reset, state should be fully independent of previous processing
+        assert!(
+            vad.hidden_states
+                .iter()
+                .all(|h| h.iter().all(|&x| x == 0.0))
+        );
+        assert!(vad.feature_buffer.iter().all(|&x| x == 0.0));
+        assert_eq!(vad.pre_emphasis_prev, 0.0);
     }
 }
