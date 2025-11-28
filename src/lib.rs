@@ -70,9 +70,6 @@ const FEATURE_STDS: [f32; 41] = [
     5.096439361572e+00, 1.152136917114e+02
 ];
 
-/// Maximum input buffer size (from C++ AUP_AED_MAX_IN_BUFF_SIZE)
-const MAX_INPUT_BUFFER_SIZE: usize = 256;
-
 /// TEN VAD ONNX model runner
 pub struct TenVad {
     session: Session,                // ONNX session for inference
@@ -83,7 +80,6 @@ pub struct TenVad {
     window: Array1<f32>,             // 1D array: [WINDOW_SIZE]
     fft_instance: Arc<dyn Fft<f32>>, // Cached FFT instance
     fft_buffer: Vec<Complex32>,      // Reusable FFT buffer
-    audio_f32_buffer: Vec<f32>,      // Reusable buffer for i16 to f32 conversion
     power_spectrum: Array1<f32>,     // Reusable power spectrum buffer
 }
 
@@ -150,8 +146,7 @@ impl TenVad {
         let fft_instance = fft_planner.plan_fft_forward(FFT_SIZE);
         let fft_buffer = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
 
-        // Pre-allocate reusable buffers
-        let audio_f32_buffer = Vec::with_capacity(MAX_INPUT_BUFFER_SIZE);
+        // Pre-allocate reusable buffer for power spectrum
         let power_spectrum = Array1::zeros(FFT_SIZE / 2 + 1);
 
         Ok(Self {
@@ -163,7 +158,6 @@ impl TenVad {
             window,
             fft_instance,
             fft_buffer,
-            audio_f32_buffer,
             power_spectrum,
         })
     }
@@ -329,7 +323,6 @@ impl TenVad {
     }
 
     /// Pre-emphasis filtering
-    #[allow(dead_code)]
     fn pre_emphasis(&mut self, audio_frame: &[f32]) -> Array1<f32> {
         if audio_frame.is_empty() {
             return Array1::zeros(0);
@@ -352,7 +345,6 @@ impl TenVad {
     }
 
     /// Extract features from audio frame
-    #[allow(dead_code)]
     fn extract_features(&mut self, audio_frame: &[f32]) -> Array1<f32> {
         // Pre-emphasis
         let emphasized = self.pre_emphasis(audio_frame);
@@ -425,68 +417,12 @@ impl TenVad {
             return Err(TenVadError::EmptyAudioData);
         }
 
-        // Convert i16 to f32 using reusable buffer (avoid allocation per frame)
+        // Convert i16 to f32 and copy to a local Vec to avoid borrow issues
         // Note: C++ uses input in [-32768, 32767] range directly (no normalization to [-1, 1])
-        self.audio_f32_buffer.clear();
-        self.audio_f32_buffer
-            .extend(audio_frame.iter().map(|&x| x as f32));
+        let audio_f32: Vec<f32> = audio_frame.iter().map(|&x| x as f32).collect();
 
-        // Pre-emphasis - inline to avoid borrow issues
-        // C++: timeSigEphaPtr[idx] = pIn->timeSignal[idx] - 0.97f * stHdl->timeSignalPre;
-        let audio_len = self.audio_f32_buffer.len();
-        let mut emphasized = Array1::zeros(audio_len);
-        if audio_len > 0 {
-            emphasized[0] = self.audio_f32_buffer[0] - PRE_EMPHASIS_COEFF * self.pre_emphasis_prev;
-            for i in 1..audio_len {
-                emphasized[i] =
-                    self.audio_f32_buffer[i] - PRE_EMPHASIS_COEFF * self.audio_f32_buffer[i - 1];
-            }
-            self.pre_emphasis_prev = self.audio_f32_buffer[audio_len - 1];
-        }
-
-        // Zero-padding to window size
-        let mut padded = Array1::zeros(WINDOW_SIZE);
-        let copy_len = audio_len.min(WINDOW_SIZE);
-        padded
-            .slice_mut(ndarray::s![..copy_len])
-            .assign(&emphasized.slice(ndarray::s![..copy_len]));
-
-        // Windowing
-        let windowed = &padded * &self.window;
-
-        // Zero the FFT buffer and prepare input
-        self.fft_buffer.fill(Complex32::new(0.0, 0.0));
-        for i in 0..WINDOW_SIZE.min(FFT_SIZE) {
-            self.fft_buffer[i] = Complex32::new(windowed[i], 0.0);
-        }
-
-        // Perform FFT
-        self.fft_instance.process(&mut self.fft_buffer);
-
-        // Compute power spectrum
-        let n_bins = FFT_SIZE / 2 + 1;
-        self.power_spectrum.fill(0.0);
-        for i in 0..n_bins {
-            self.power_spectrum[i] = self.fft_buffer[i].norm_sqr();
-        }
-
-        // Mel filter bank features with normalization
-        let power_normal = 32768.0f32 * 32768.0f32;
-        let mel_features = self.mel_filters.dot(&self.power_spectrum);
-        let mel_features = mel_features.mapv(|x| (x / power_normal + EPS).ln());
-
-        // Estimate pitch frequency using autocorrelation on the original audio
-        let pitch_freq = Self::estimate_pitch(&self.audio_f32_buffer);
-
-        // Combine and normalize features
-        let mut features = Array1::zeros(FEATURE_LEN);
-        features
-            .slice_mut(ndarray::s![..MEL_FILTER_BANK_NUM])
-            .assign(&mel_features);
-        features[MEL_FILTER_BANK_NUM] = pitch_freq;
-        for i in 0..FEATURE_LEN {
-            features[i] = (features[i] - FEATURE_MEANS[i]) / (FEATURE_STDS[i] + EPS);
-        }
+        // Extract features (includes pre-emphasis, windowing, FFT, mel filterbank, pitch estimation)
+        let features = self.extract_features(&audio_f32);
 
         // Update feature buffer (sliding window) using memmove-style operation
         // C++ code: memmove(aivadInputFeatStack, aivadInputFeatStack + srcOffset, sizeof(float) * srcLen);
