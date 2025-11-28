@@ -71,8 +71,9 @@ impl SpeechState {
         if speech_prob {
             if !self.triggered {
                 self.triggered = true;
-                self.current_speech.start =
-                    self.current_sample.saturating_sub(params.speech_pad_samples);
+                self.current_speech.start = self
+                    .current_sample
+                    .saturating_sub(params.speech_pad_samples);
                 self.current_speech.max_probability = vad_score;
             }
             self.temp_end = 0;
@@ -82,7 +83,10 @@ impl SpeechState {
             }
             if self.current_sample.saturating_sub(self.temp_end) > params.min_silence_samples {
                 self.current_speech.end = self.temp_end + params.speech_pad_samples;
-                if self.current_speech.end.saturating_sub(self.current_speech.start)
+                if self
+                    .current_speech
+                    .end
+                    .saturating_sub(self.current_speech.start)
                     > params.min_speech_samples
                 {
                     let speech = std::mem::take(&mut self.current_speech);
@@ -104,7 +108,10 @@ impl SpeechState {
     fn finalize(&mut self, params: &SpeechParams) -> Option<SpeechSegment> {
         if self.current_speech.start > 0 {
             self.current_speech.end = self.current_sample + params.speech_pad_samples;
-            if self.current_speech.end.saturating_sub(self.current_speech.start)
+            if self
+                .current_speech
+                .end
+                .saturating_sub(self.current_speech.start)
                 > params.min_speech_samples
             {
                 let speech = std::mem::take(&mut self.current_speech);
@@ -197,7 +204,10 @@ fn process_wav_file(wav_file_path: &str, vad: &mut TenVad) -> anyhow::Result<()>
         "Sample rate: {} Hz, Channels: {}, Bits per sample: {}",
         spec.sample_rate, spec.channels, spec.bits_per_sample
     );
-    println!("Duration: {:.2}s ({} samples)", total_duration, total_samples);
+    println!(
+        "Duration: {:.2}s ({} samples)",
+        total_duration, total_samples
+    );
     println!();
 
     audio_buffer.append_samples(all_i16_samples);
@@ -250,12 +260,7 @@ fn process_wav_file(wav_file_path: &str, vad: &mut TenVad) -> anyhow::Result<()>
         );
         println!(
             "  Average peak probability: {:.0}%",
-            segments
-                .iter()
-                .map(|s| s.max_probability)
-                .sum::<f32>()
-                / segments.len() as f32
-                * 100.0
+            segments.iter().map(|s| s.max_probability).sum::<f32>() / segments.len() as f32 * 100.0
         );
     }
 
