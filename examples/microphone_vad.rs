@@ -166,11 +166,18 @@ impl SpeechState {
     }
 }
 
+fn format_timestamp(samples: i64, sample_rate: u32) -> String {
+    let total_seconds = samples as f32 / sample_rate as f32;
+    let minutes = (total_seconds / 60.0) as u32;
+    let seconds = total_seconds % 60.0;
+    format!("{:02}:{:05.2}", minutes, seconds)
+}
+
 fn print_speech_segment(segment: &SpeechSegment, sample_rate: u32) {
-    let start_time = segment.start as f32 / sample_rate as f32;
-    let end_time = segment.end as f32 / sample_rate as f32;
-    let duration = end_time - start_time;
-    println!("🎤 Speech detected: {start_time:.2}s - {end_time:.2}s (duration: {duration:.2}s)");
+    let start_time = format_timestamp(segment.start, sample_rate);
+    let end_time = format_timestamp(segment.end, sample_rate);
+    let duration = (segment.end - segment.start) as f32 / sample_rate as f32;
+    println!("🎤 Speech detected: {start_time} - {end_time} (duration: {duration:.2}s)");
 }
 
 fn run_audio_processing(
