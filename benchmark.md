@@ -16,10 +16,10 @@ This report compares the performance of three configurations:
 ## Executive Summary
 
 | Configuration | 256-sample Frame | 512-sample Frame | Full WAV File |
-|--------------|------------------|------------------|---------------|
-| Master Branch | ~25.0 µs | ~25.0 µs | ~14.1 ms |
-| Perf + Pitch | ~24.3 µs | ~55.3 µs | ~13.9 ms |
-| Perf - Pitch | ~24.7 µs | ~25.0 µs | ~14.1 ms |
+| ------------- | ---------------- | ---------------- | ------------- |
+| Master Branch | ~25.0 µs         | ~25.0 µs         | ~14.1 ms      |
+| Perf + Pitch  | ~24.3 µs         | ~55.3 µs         | ~13.9 ms      |
+| Perf - Pitch  | ~24.7 µs         | ~25.0 µs         | ~14.1 ms      |
 
 ### Key Findings
 
@@ -40,93 +40,93 @@ This report compares the performance of three configurations:
 Processing time for individual audio frames of various sizes.
 
 #### Frame Size: 160 samples (10ms at 16kHz)
-| Configuration | Time | Throughput |
-|--------------|------|------------|
-| Master | 24.64 µs | 6.49 Melem/s |
-| Perf + Pitch | 24.04 µs | 6.66 Melem/s |
-| Perf - Pitch | 24.96 µs | 6.41 Melem/s |
+| Configuration | Time     | Throughput   |
+| ------------- | -------- | ------------ |
+| Master        | 24.64 µs | 6.49 Melem/s |
+| Perf + Pitch  | 24.04 µs | 6.66 Melem/s |
+| Perf - Pitch  | 24.96 µs | 6.41 Melem/s |
 
 #### Frame Size: 256 samples (16ms at 16kHz) ⭐ Recommended
-| Configuration | Time | Throughput |
-|--------------|------|------------|
-| Master | 25.06 µs | 10.22 Melem/s |
-| Perf + Pitch | 24.31 µs | 10.53 Melem/s |
-| Perf - Pitch | 24.71 µs | 10.36 Melem/s |
+| Configuration | Time     | Throughput    |
+| ------------- | -------- | ------------- |
+| Master        | 25.06 µs | 10.22 Melem/s |
+| Perf + Pitch  | 24.31 µs | 10.53 Melem/s |
+| Perf - Pitch  | 24.71 µs | 10.36 Melem/s |
 
 #### Frame Size: 320 samples (20ms at 16kHz)
-| Configuration | Time | Throughput |
-|--------------|------|------------|
-| Master | 25.24 µs | 12.68 Melem/s |
-| Perf + Pitch | 29.45 µs | 10.87 Melem/s |
-| Perf - Pitch | 24.84 µs | 12.88 Melem/s |
+| Configuration | Time     | Throughput    |
+| ------------- | -------- | ------------- |
+| Master        | 25.24 µs | 12.68 Melem/s |
+| Perf + Pitch  | 29.45 µs | 10.87 Melem/s |
+| Perf - Pitch  | 24.84 µs | 12.88 Melem/s |
 
 #### Frame Size: 480 samples (30ms at 16kHz)
-| Configuration | Time | Throughput |
-|--------------|------|------------|
-| Master | 25.44 µs | 18.87 Melem/s |
-| Perf + Pitch | 50.13 µs | 9.58 Melem/s |
-| Perf - Pitch | 24.95 µs | 19.24 Melem/s |
+| Configuration | Time     | Throughput    |
+| ------------- | -------- | ------------- |
+| Master        | 25.44 µs | 18.87 Melem/s |
+| Perf + Pitch  | 50.13 µs | 9.58 Melem/s  |
+| Perf - Pitch  | 24.95 µs | 19.24 Melem/s |
 
 #### Frame Size: 512 samples (32ms at 16kHz)
-| Configuration | Time | Throughput |
-|--------------|------|------------|
-| Master | 25.07 µs | 20.42 Melem/s |
-| Perf + Pitch | 55.33 µs | 9.25 Melem/s |
-| Perf - Pitch | 24.95 µs | 20.52 Melem/s |
+| Configuration | Time     | Throughput    |
+| ------------- | -------- | ------------- |
+| Master        | 25.07 µs | 20.42 Melem/s |
+| Perf + Pitch  | 55.33 µs | 9.25 Melem/s  |
+| Perf - Pitch  | 24.95 µs | 20.52 Melem/s |
 
 ### 2. Full WAV File Processing
 
 Processing a complete audio file (sample.wav) with sequential frame processing.
 
-| Configuration | Time | Relative |
-|--------------|------|----------|
-| Master | 14.10 ms | baseline |
-| Perf + Pitch | 13.94 ms | **-1.1%** ✅ |
-| Perf - Pitch | 14.15 ms | +0.4% |
+| Configuration | Time     | Relative    |
+| ------------- | -------- | ----------- |
+| Master        | 14.10 ms | baseline    |
+| Perf + Pitch  | 13.94 ms | **-1.1%** ✅ |
+| Perf - Pitch  | 14.15 ms | +0.4%       |
 
 ### 3. Sequential Frame Processing (514 frames)
 
 Processing 514 consecutive 256-sample frames.
 
-| Configuration | Time | Throughput |
-|--------------|------|------------|
-| Master | 14.06 ms | 36.57 Kelem/s |
-| Perf + Pitch | 13.96 ms | 36.83 Kelem/s |
-| Perf - Pitch | 14.09 ms | 36.47 Kelem/s |
+| Configuration | Time     | Throughput    |
+| ------------- | -------- | ------------- |
+| Master        | 14.06 ms | 36.57 Kelem/s |
+| Perf + Pitch  | 13.96 ms | 36.83 Kelem/s |
+| Perf - Pitch  | 14.09 ms | 36.47 Kelem/s |
 
 ### 4. Initialization
 
-| Operation | Master | Perf + Pitch | Perf - Pitch |
-|-----------|--------|--------------|--------------|
-| From File | 1.018 ms | 1.000 ms | 1.011 ms |
-| From Bytes | 995 µs | 985 µs | 995 µs |
+| Operation  | Master   | Perf + Pitch | Perf - Pitch |
+| ---------- | -------- | ------------ | ------------ |
+| From File  | 1.018 ms | 1.000 ms     | 1.011 ms     |
+| From Bytes | 995 µs   | 985 µs       | 995 µs       |
 
 ### 5. Reset Operation
 
-| Configuration | Time |
-|--------------|------|
-| Master | 13.42 ns |
-| Perf + Pitch | 13.49 ns |
-| Perf - Pitch | 13.58 ns |
+| Configuration | Time     |
+| ------------- | -------- |
+| Master        | 13.42 ns |
+| Perf + Pitch  | 13.49 ns |
+| Perf - Pitch  | 13.58 ns |
 
 ### 6. Audio Buffer Operations
 
-| Operation | Master | Perf + Pitch | Perf - Pitch |
-|-----------|--------|--------------|--------------|
-| Append 1000 samples | 34.91 ns | 36.20 ns | 36.66 ns |
-| Pop frame (256) | 6.47 µs | 6.41 µs | 6.45 µs |
+| Operation           | Master   | Perf + Pitch | Perf - Pitch |
+| ------------------- | -------- | ------------ | ------------ |
+| Append 1000 samples | 34.91 ns | 36.20 ns     | 36.66 ns     |
+| Pop frame (256)     | 6.47 µs  | 6.41 µs      | 6.45 µs      |
 
 ### 7. Audio Content Type Performance (256 samples)
 
 Performance with different audio content types.
 
-| Content Type | Master | Perf + Pitch | Perf - Pitch |
-|--------------|--------|--------------|--------------|
-| Silence | 25.26 µs | 25.20 µs | 25.44 µs |
-| Tone 100Hz | 25.21 µs | 24.95 µs | 25.01 µs |
-| Tone 200Hz | 25.15 µs | 24.88 µs | 25.08 µs |
-| Tone 1000Hz | 25.18 µs | 25.06 µs | 27.42 µs |
-| Noise | 25.23 µs | 24.95 µs | 25.03 µs |
+| Content Type | Master   | Perf + Pitch | Perf - Pitch |
+| ------------ | -------- | ------------ | ------------ |
+| Silence      | 25.26 µs | 25.20 µs     | 25.44 µs     |
+| Tone 100Hz   | 25.21 µs | 24.95 µs     | 25.01 µs     |
+| Tone 200Hz   | 25.15 µs | 24.88 µs     | 25.08 µs     |
+| Tone 1000Hz  | 25.18 µs | 25.06 µs     | 27.42 µs     |
+| Noise        | 25.23 µs | 24.95 µs     | 25.03 µs     |
 
 ---
 
