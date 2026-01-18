@@ -19,12 +19,13 @@ strip = true
 [dependencies]
 ndarray = "0.17.1"
 ort = "=2.0.0-rc.11"
-rubato = "0.16.2"
-thiserror = "2.0.12"
+rubato = "1.0.0"
+thiserror = "2.0.17"
 rustfft = "6.2.0"
 log = "0.4.27"
 
 [dev-dependencies]
 hound = "3.5.1"
-cpal = "0.16.0"
+cpal = "0.17.1"
 anyhow = "1.0.98"
+audioadapter-buffers = "2.0.0"
