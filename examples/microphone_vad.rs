@@ -1,6 +1,8 @@
+use anyhow::{Context, anyhow};
+use audioadapter_buffers::direct::InterleavedSlice;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+    Async, Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use std::thread;
 use ten_vad_rs::{AudioFrameBuffer, TARGET_SAMPLE_RATE, TenVad};
@@ -187,14 +189,15 @@ fn run_audio_processing(
         window: WindowFunction::BlackmanHarris2,
     };
 
-    let mut resampler = SincFixedIn::<f32>::new(
+    let mut resampler = Async::<f32>::new_sinc(
         TARGET_SAMPLE_RATE as f64 / input_sample_rate as f64,
         2.0, // max_relative_ratio
-        params,
+        &params,
         RESAMPLER_CHUNK_SIZE,
         1,
+        rubato::FixedAsync::Input,
     )?;
-    let mut resampler_output_buffer = resampler.output_buffer_allocate(true);
+    let mut resampler_output_buffer = vec![0.0f32; resampler.output_frames_max()];
 
     let mut audio_resample_buffer = AudioFrameBuffer::new();
     let mut audio_vad_buffer = AudioFrameBuffer::new();
@@ -222,13 +225,17 @@ fn run_audio_processing(
             // Resample the audio to the target sample rate
             audio_resample_buffer.append_samples(mono_f32_samples);
             if let Some(resample_frame) = audio_resample_buffer.pop_frame(RESAMPLER_CHUNK_SIZE) {
-                let (_, out_len) = resampler.process_into_buffer(
-                    &[&resample_frame],
-                    &mut resampler_output_buffer,
-                    None,
-                )?;
+                let input_adapter = InterleavedSlice::new(&resample_frame, 1, resample_frame.len())
+                    .context("Create interleaved input adapter for resampling")?;
+                let output_capacity = resampler_output_buffer.len();
+                let mut output_adapter =
+                    InterleavedSlice::new_mut(&mut resampler_output_buffer, 1, output_capacity)
+                        .context("Create interleaved output adapter for resampling")?;
 
-                let resampled_f32_samples = &resampler_output_buffer[0][..out_len];
+                let (_, out_len) =
+                    resampler.process_into_buffer(&input_adapter, &mut output_adapter, None)?;
+
+                let resampled_f32_samples = &resampler_output_buffer[..out_len];
 
                 let resampled_i16_samples: Vec<i16> = resampled_f32_samples
                     .iter()
@@ -282,10 +289,10 @@ fn main() -> anyhow::Result<()> {
         .default_input_config()
         .map_err(|e| anyhow::anyhow!("Failed to get default input config: {}", e))?;
 
-    let input_sample_rate = input_stream_config.sample_rate().0;
+    let input_sample_rate = input_stream_config.sample_rate();
     let input_channels = input_stream_config.channels() as usize;
 
-    println!("Input device: {}", input_device.name()?);
+    println!("Input device: {}", input_device.description()?);
     println!("Input sample rate: {input_sample_rate} Hz, Channels: {input_channels}");
     println!("Listening for speech... (Ctrl+C to stop)");
 
@@ -310,7 +317,9 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    join_handle.join().expect("Thread panicked");
+    join_handle
+        .join()
+        .map_err(|_| anyhow!("Audio processing thread panicked"))?;
 
     Ok(())
 }
