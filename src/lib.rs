@@ -1,7 +1,9 @@
 #![allow(clippy::excessive_precision)]
 
 mod buffer;
+mod biquad;
 mod error;
+mod pitch_est;
 
 // Re-export error types for public API
 pub use crate::buffer::AudioFrameBuffer;
@@ -14,6 +16,7 @@ use ndarray::{Array1, Array2, Axis};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::{SessionInputValue, SessionInputs};
 use ort::{session::Session, value::TensorRef};
+use pitch_est::PitchEstimator;
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 use std::{f32::consts::PI, sync::Arc};
 
@@ -75,6 +78,8 @@ pub struct TenVad {
     window: Array1<f32>,             // 1D array: [WINDOW_SIZE]
     fft_instance: Arc<dyn Fft<f32>>, // Cached FFT instance
     fft_buffer: Vec<Complex32>,      // Reusable FFT buffer
+    stft_input_q: Vec<f32>,          // Sliding STFT input queue (pre-emphasized samples)
+    pitch_estimator: PitchEstimator, // Pitch estimator state
 }
 
 impl TenVad {
@@ -139,6 +144,8 @@ impl TenVad {
         let mut fft_planner = FftPlanner::new();
         let fft_instance = fft_planner.plan_fft_forward(FFT_SIZE);
         let fft_buffer = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
+        let stft_input_q = vec![0.0f32; WINDOW_SIZE];
+        let pitch_estimator = PitchEstimator::new();
 
         Ok(Self {
             session,
@@ -149,6 +156,8 @@ impl TenVad {
             window,
             fft_instance,
             fft_buffer,
+            stft_input_q,
+            pitch_estimator,
         })
     }
 
@@ -254,15 +263,19 @@ impl TenVad {
         // Pre-emphasis
         let emphasized = self.pre_emphasis(audio_frame);
 
-        // Zero-padding to window size
-        let mut padded = Array1::zeros(WINDOW_SIZE);
-        let copy_len = emphasized.len().min(WINDOW_SIZE);
-        padded
-            .slice_mut(ndarray::s![..copy_len])
-            .assign(&emphasized.slice(ndarray::s![..copy_len]));
+        // Sliding STFT window (hop of 256 samples in the reference pipeline).
+        let hop_size = 256.min(WINDOW_SIZE).min(emphasized.len());
+        if hop_size > 0 {
+            self.stft_input_q.copy_within(hop_size.., 0);
+            let dst_start = WINDOW_SIZE - hop_size;
+            for i in 0..hop_size {
+                self.stft_input_q[dst_start + i] = emphasized[emphasized.len() - hop_size + i];
+            }
+        }
 
         // Windowing
-        let windowed = &padded * &self.window;
+        let stft_in = Array1::from_vec(self.stft_input_q.clone());
+        let windowed = &stft_in * &self.window;
 
         // Zero the FFT buffer before use to clear any previous data (using cached FFT instance and reusable buffer)
         self.fft_buffer.fill(Complex32::new(0.0, 0.0));
@@ -282,7 +295,10 @@ impl TenVad {
             power_spectrum[i] = self.fft_buffer[i].norm_sqr();
         }
 
-        // Normalization (corresponding to powerNormal = 32768^2 in C++)
+        // Keep an unnormalized copy for the pitch estimator.
+        let pitch_bin_power = power_spectrum.clone();
+
+        // Normalize mel path (corresponding to powerNormal = 32768^2 in C++).
         let power_normal = 32768.0f32.powi(2);
         power_spectrum /= power_normal;
 
@@ -290,9 +306,10 @@ impl TenVad {
         let mel_features = self.mel_filters.dot(&power_spectrum);
         let mel_features = mel_features.mapv(|x| (x + EPS).ln());
 
-        // TODO: Implement pitch estimation. The original C++ code has a more complex pitch estimation algorithm.
-        // For now, pitch is hardcoded to 0.0.
-        let pitch_freq = 0.0f32;
+        // Pitch estimation consumes raw (non-pre-emphasized) signal and unnormalized bin power.
+        let pitch_freq = self
+            .pitch_estimator
+            .process(audio_frame, pitch_bin_power.as_slice().unwrap_or(&[]));
 
         // Combine features
         let mut features = Array1::zeros(FEATURE_LEN);
@@ -385,6 +402,8 @@ impl TenVad {
 
         // Reset pre-emphasis previous value
         self.pre_emphasis_prev = 0.0f32;
+        self.stft_input_q.fill(0.0f32);
+        self.pitch_estimator.reset();
     }
 }
 
@@ -397,6 +416,8 @@ impl std::fmt::Debug for TenVad {
             .field("pre_emphasis_prev", &self.pre_emphasis_prev)
             .field("mel_filters", &self.mel_filters.shape())
             .field("window", &self.window.len())
+            .field("stft_input_q", &self.stft_input_q.len())
+            .field("pitch_estimator", &self.pitch_estimator)
             .finish()
     }
 }
