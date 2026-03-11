@@ -45,7 +45,11 @@ cargo run --example pr_curve -- ten-vad/testset onnx/ten-vad.onnx
 ```
 
 This produces `PR_data_TEN_VAD_RS.txt` with threshold / precision / recall rows.
-The data can be compared to the base ten-vad implementation's PR curve results. 
+The data can be compared to the base ten-vad implementation's PR curve results.
+
+
+![pr curves](/media/pr_curves.png)
+
 
 ## 🛠️ Building
 Requires Rust and a working ONNX Runtime environment. Build with:
