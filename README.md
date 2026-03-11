@@ -35,6 +35,17 @@ let vad_score = vad.process_frame(&audio_frame).unwrap();
 See the [`examples/`](examples/) directory for more advanced usage:
 - `wav_file_vad.rs` — Run VAD on a WAV file
 - `microphone_vad.rs` — Real-time VAD from microphone
+- `pr_curve.rs` — Compute precision-recall curves on the TEN-VAD TestSet
+
+## 📊 PR Curve Evaluation
+
+Generate precision-recall data using the Rust example. The ten-vad repository is required for test set files.
+```sh
+cargo run --example pr_curve -- ten-vad/testset onnx/ten-vad.onnx
+```
+
+This produces `PR_data_TEN_VAD_RS.txt` with threshold / precision / recall rows.
+The data can be compared to the base ten-vad implementation's PR curve results. 
 
 ## 🛠️ Building
 Requires Rust and a working ONNX Runtime environment. Build with:
