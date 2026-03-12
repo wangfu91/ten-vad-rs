@@ -29,3 +29,6 @@ hound = "3.5.1"
 cpal = "0.17.1"
 anyhow = "1.0.98"
 audioadapter-buffers = "2.0.0"
+
+[[example]]
+name = "pr_curve"

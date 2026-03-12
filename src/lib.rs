@@ -1,7 +1,9 @@
 #![allow(clippy::excessive_precision)]
 
+mod biquad;
 mod buffer;
 mod error;
+mod pitch_est;
 
 // Re-export error types for public API
 pub use crate::buffer::AudioFrameBuffer;
@@ -10,12 +12,13 @@ pub use crate::error::{TenVadError, TenVadResult};
 /// Target sample rate for TEN VAD (16kHz)
 pub const TARGET_SAMPLE_RATE: u32 = 16000;
 
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, Axis, aview1};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::{SessionInputValue, SessionInputs};
 use ort::{session::Session, value::TensorRef};
+use pitch_est::PitchEstimator;
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
-use std::{f32::consts::PI, sync::Arc};
+use std::sync::Arc;
 
 const FFT_SIZE: usize = 1024;
 const WINDOW_SIZE: usize = 768;
@@ -65,16 +68,216 @@ const FEATURE_STDS: [f32; 41] = [
     5.096439361572e+00, 1.152136917114e+02
 ];
 
+/// Hann window coefficients (from coeff.h)
+#[rustfmt::skip]
+const HANN_WINDOW_768: [f32; WINDOW_SIZE] = [
+    0.0000000e+00, 1.6733041e-05, 6.6931045e-05, 1.5059065e-04,
+    2.6770626e-04, 4.1827004e-04, 6.0227190e-04, 8.1969953e-04,
+    1.0705384e-03, 1.3547717e-03, 1.6723803e-03, 2.0233432e-03,
+    2.4076367e-03, 2.8252351e-03, 3.2761105e-03, 3.7602327e-03,
+    4.2775693e-03, 4.8280857e-03, 5.4117450e-03, 6.0285082e-03,
+    6.6783340e-03, 7.3611788e-03, 8.0769970e-03, 8.8257407e-03,
+    9.6073598e-03, 1.0421802e-02, 1.1269013e-02, 1.2148935e-02,
+    1.3061510e-02, 1.4006678e-02, 1.4984373e-02, 1.5994532e-02,
+    1.7037087e-02, 1.8111967e-02, 1.9219101e-02, 2.0358415e-02,
+    2.1529832e-02, 2.2733274e-02, 2.3968661e-02, 2.5235910e-02,
+    2.6534935e-02, 2.7865651e-02, 2.9227967e-02, 3.0621794e-02,
+    3.2047037e-02, 3.3503601e-02, 3.4991388e-02, 3.6510300e-02,
+    3.8060234e-02, 3.9641086e-02, 4.1252752e-02, 4.2895122e-02,
+    4.4568088e-02, 4.6271536e-02, 4.8005353e-02, 4.9769424e-02,
+    5.1563629e-02, 5.3387849e-02, 5.5241962e-02, 5.7125844e-02,
+    5.9039368e-02, 6.0982406e-02, 6.2954829e-02, 6.4956504e-02,
+    6.6987298e-02, 6.9047074e-02, 7.1135695e-02, 7.3253021e-02,
+    7.5398909e-02, 7.7573217e-02, 7.9775799e-02, 8.2006508e-02,
+    8.4265194e-02, 8.6551706e-02, 8.8865891e-02, 9.1207593e-02,
+    9.3576658e-02, 9.5972925e-02, 9.8396234e-02, 1.0084642e-01,
+    1.0332333e-01, 1.0582679e-01, 1.0835663e-01, 1.1091268e-01,
+    1.1349477e-01, 1.1610274e-01, 1.1873640e-01, 1.2139558e-01,
+    1.2408010e-01, 1.2678978e-01, 1.2952444e-01, 1.3228389e-01,
+    1.3506796e-01, 1.3787646e-01, 1.4070919e-01, 1.4356597e-01,
+    1.4644661e-01, 1.4935091e-01, 1.5227868e-01, 1.5522973e-01,
+    1.5820385e-01, 1.6120085e-01, 1.6422052e-01, 1.6726267e-01,
+    1.7032709e-01, 1.7341358e-01, 1.7652192e-01, 1.7965192e-01,
+    1.8280336e-01, 1.8597603e-01, 1.8916971e-01, 1.9238420e-01,
+    1.9561929e-01, 1.9887474e-01, 2.0215035e-01, 2.0544589e-01,
+    2.0876115e-01, 2.1209590e-01, 2.1544993e-01, 2.1882300e-01,
+    2.2221488e-01, 2.2562536e-01, 2.2905421e-01, 2.3250119e-01,
+    2.3596607e-01, 2.3944863e-01, 2.4294863e-01, 2.4646583e-01,
+    2.5000000e-01, 2.5355090e-01, 2.5711830e-01, 2.6070196e-01,
+    2.6430163e-01, 2.6791708e-01, 2.7154806e-01, 2.7519434e-01,
+    2.7885565e-01, 2.8253178e-01, 2.8622245e-01, 2.8992744e-01,
+    2.9364649e-01, 2.9737934e-01, 3.0112576e-01, 3.0488549e-01,
+    3.0865828e-01, 3.1244388e-01, 3.1624203e-01, 3.2005248e-01,
+    3.2387498e-01, 3.2770926e-01, 3.3155507e-01, 3.3541216e-01,
+    3.3928027e-01, 3.4315913e-01, 3.4704849e-01, 3.5094809e-01,
+    3.5485766e-01, 3.5877695e-01, 3.6270569e-01, 3.6664362e-01,
+    3.7059048e-01, 3.7454600e-01, 3.7850991e-01, 3.8248196e-01,
+    3.8646187e-01, 3.9044938e-01, 3.9444422e-01, 3.9844613e-01,
+    4.0245484e-01, 4.0647007e-01, 4.1049157e-01, 4.1451906e-01,
+    4.1855226e-01, 4.2259092e-01, 4.2663476e-01, 4.3068351e-01,
+    4.3473690e-01, 4.3879466e-01, 4.4285652e-01, 4.4692220e-01,
+    4.5099143e-01, 4.5506394e-01, 4.5913946e-01, 4.6321772e-01,
+    4.6729844e-01, 4.7138134e-01, 4.7546616e-01, 4.7955263e-01,
+    4.8364046e-01, 4.8772939e-01, 4.9181913e-01, 4.9590943e-01,
+    5.0000000e-01, 5.0409057e-01, 5.0818087e-01, 5.1227061e-01,
+    5.1635954e-01, 5.2044737e-01, 5.2453384e-01, 5.2861866e-01,
+    5.3270156e-01, 5.3678228e-01, 5.4086054e-01, 5.4493606e-01,
+    5.4900857e-01, 5.5307780e-01, 5.5714348e-01, 5.6120534e-01,
+    5.6526310e-01, 5.6931649e-01, 5.7336524e-01, 5.7740908e-01,
+    5.8144774e-01, 5.8548094e-01, 5.8950843e-01, 5.9352993e-01,
+    5.9754516e-01, 6.0155387e-01, 6.0555578e-01, 6.0955062e-01,
+    6.1353813e-01, 6.1751804e-01, 6.2149009e-01, 6.2545400e-01,
+    6.2940952e-01, 6.3335638e-01, 6.3729431e-01, 6.4122305e-01,
+    6.4514234e-01, 6.4905191e-01, 6.5295151e-01, 6.5684087e-01,
+    6.6071973e-01, 6.6458784e-01, 6.6844493e-01, 6.7229074e-01,
+    6.7612502e-01, 6.7994752e-01, 6.8375797e-01, 6.8755612e-01,
+    6.9134172e-01, 6.9511451e-01, 6.9887424e-01, 7.0262066e-01,
+    7.0635351e-01, 7.1007256e-01, 7.1377755e-01, 7.1746822e-01,
+    7.2114435e-01, 7.2480566e-01, 7.2845194e-01, 7.3208292e-01,
+    7.3569837e-01, 7.3929804e-01, 7.4288170e-01, 7.4644910e-01,
+    7.5000000e-01, 7.5353417e-01, 7.5705137e-01, 7.6055137e-01,
+    7.6403393e-01, 7.6749881e-01, 7.7094579e-01, 7.7437464e-01,
+    7.7778512e-01, 7.8117700e-01, 7.8455007e-01, 7.8790410e-01,
+    7.9123885e-01, 7.9455411e-01, 7.9784965e-01, 8.0112526e-01,
+    8.0438071e-01, 8.0761580e-01, 8.1083029e-01, 8.1402397e-01,
+    8.1719664e-01, 8.2034808e-01, 8.2347808e-01, 8.2658642e-01,
+    8.2967291e-01, 8.3273733e-01, 8.3577948e-01, 8.3879915e-01,
+    8.4179615e-01, 8.4477027e-01, 8.4772132e-01, 8.5064909e-01,
+    8.5355339e-01, 8.5643403e-01, 8.5929081e-01, 8.6212354e-01,
+    8.6493204e-01, 8.6771611e-01, 8.7047556e-01, 8.7321022e-01,
+    8.7591990e-01, 8.7860442e-01, 8.8126360e-01, 8.8389726e-01,
+    8.8650523e-01, 8.8908732e-01, 8.9164337e-01, 8.9417321e-01,
+    8.9667667e-01, 8.9915358e-01, 9.0160377e-01, 9.0402708e-01,
+    9.0642334e-01, 9.0879241e-01, 9.1113411e-01, 9.1344829e-01,
+    9.1573481e-01, 9.1799349e-01, 9.2022420e-01, 9.2242678e-01,
+    9.2460109e-01, 9.2674698e-01, 9.2886431e-01, 9.3095293e-01,
+    9.3301270e-01, 9.3504350e-01, 9.3704517e-01, 9.3901759e-01,
+    9.4096063e-01, 9.4287416e-01, 9.4475804e-01, 9.4661215e-01,
+    9.4843637e-01, 9.5023058e-01, 9.5199465e-01, 9.5372846e-01,
+    9.5543191e-01, 9.5710488e-01, 9.5874725e-01, 9.6035891e-01,
+    9.6193977e-01, 9.6348970e-01, 9.6500861e-01, 9.6649640e-01,
+    9.6795296e-01, 9.6937821e-01, 9.7077203e-01, 9.7213435e-01,
+    9.7346506e-01, 9.7476409e-01, 9.7603134e-01, 9.7726673e-01,
+    9.7847017e-01, 9.7964159e-01, 9.8078090e-01, 9.8188803e-01,
+    9.8296291e-01, 9.8400547e-01, 9.8501563e-01, 9.8599332e-01,
+    9.8693849e-01, 9.8785107e-01, 9.8873099e-01, 9.8957820e-01,
+    9.9039264e-01, 9.9117426e-01, 9.9192300e-01, 9.9263882e-01,
+    9.9332167e-01, 9.9397149e-01, 9.9458825e-01, 9.9517191e-01,
+    9.9572243e-01, 9.9623977e-01, 9.9672389e-01, 9.9717476e-01,
+    9.9759236e-01, 9.9797666e-01, 9.9832762e-01, 9.9864523e-01,
+    9.9892946e-01, 9.9918030e-01, 9.9939773e-01, 9.9958173e-01,
+    9.9973229e-01, 9.9984941e-01, 9.9993307e-01, 9.9998327e-01,
+    1.0000000e+00, 9.9998327e-01, 9.9993307e-01, 9.9984941e-01,
+    9.9973229e-01, 9.9958173e-01, 9.9939773e-01, 9.9918030e-01,
+    9.9892946e-01, 9.9864523e-01, 9.9832762e-01, 9.9797666e-01,
+    9.9759236e-01, 9.9717476e-01, 9.9672389e-01, 9.9623977e-01,
+    9.9572243e-01, 9.9517191e-01, 9.9458825e-01, 9.9397149e-01,
+    9.9332167e-01, 9.9263882e-01, 9.9192300e-01, 9.9117426e-01,
+    9.9039264e-01, 9.8957820e-01, 9.8873099e-01, 9.8785107e-01,
+    9.8693849e-01, 9.8599332e-01, 9.8501563e-01, 9.8400547e-01,
+    9.8296291e-01, 9.8188803e-01, 9.8078090e-01, 9.7964159e-01,
+    9.7847017e-01, 9.7726673e-01, 9.7603134e-01, 9.7476409e-01,
+    9.7346506e-01, 9.7213435e-01, 9.7077203e-01, 9.6937821e-01,
+    9.6795296e-01, 9.6649640e-01, 9.6500861e-01, 9.6348970e-01,
+    9.6193977e-01, 9.6035891e-01, 9.5874725e-01, 9.5710488e-01,
+    9.5543191e-01, 9.5372846e-01, 9.5199465e-01, 9.5023058e-01,
+    9.4843637e-01, 9.4661215e-01, 9.4475804e-01, 9.4287416e-01,
+    9.4096063e-01, 9.3901759e-01, 9.3704517e-01, 9.3504350e-01,
+    9.3301270e-01, 9.3095293e-01, 9.2886431e-01, 9.2674698e-01,
+    9.2460109e-01, 9.2242678e-01, 9.2022420e-01, 9.1799349e-01,
+    9.1573481e-01, 9.1344829e-01, 9.1113411e-01, 9.0879241e-01,
+    9.0642334e-01, 9.0402708e-01, 9.0160377e-01, 8.9915358e-01,
+    8.9667667e-01, 8.9417321e-01, 8.9164337e-01, 8.8908732e-01,
+    8.8650523e-01, 8.8389726e-01, 8.8126360e-01, 8.7860442e-01,
+    8.7591990e-01, 8.7321022e-01, 8.7047556e-01, 8.6771611e-01,
+    8.6493204e-01, 8.6212354e-01, 8.5929081e-01, 8.5643403e-01,
+    8.5355339e-01, 8.5064909e-01, 8.4772132e-01, 8.4477027e-01,
+    8.4179615e-01, 8.3879915e-01, 8.3577948e-01, 8.3273733e-01,
+    8.2967291e-01, 8.2658642e-01, 8.2347808e-01, 8.2034808e-01,
+    8.1719664e-01, 8.1402397e-01, 8.1083029e-01, 8.0761580e-01,
+    8.0438071e-01, 8.0112526e-01, 7.9784965e-01, 7.9455411e-01,
+    7.9123885e-01, 7.8790410e-01, 7.8455007e-01, 7.8117700e-01,
+    7.7778512e-01, 7.7437464e-01, 7.7094579e-01, 7.6749881e-01,
+    7.6403393e-01, 7.6055137e-01, 7.5705137e-01, 7.5353417e-01,
+    7.5000000e-01, 7.4644910e-01, 7.4288170e-01, 7.3929804e-01,
+    7.3569837e-01, 7.3208292e-01, 7.2845194e-01, 7.2480566e-01,
+    7.2114435e-01, 7.1746822e-01, 7.1377755e-01, 7.1007256e-01,
+    7.0635351e-01, 7.0262066e-01, 6.9887424e-01, 6.9511451e-01,
+    6.9134172e-01, 6.8755612e-01, 6.8375797e-01, 6.7994752e-01,
+    6.7612502e-01, 6.7229074e-01, 6.6844493e-01, 6.6458784e-01,
+    6.6071973e-01, 6.5684087e-01, 6.5295151e-01, 6.4905191e-01,
+    6.4514234e-01, 6.4122305e-01, 6.3729431e-01, 6.3335638e-01,
+    6.2940952e-01, 6.2545400e-01, 6.2149009e-01, 6.1751804e-01,
+    6.1353813e-01, 6.0955062e-01, 6.0555578e-01, 6.0155387e-01,
+    5.9754516e-01, 5.9352993e-01, 5.8950843e-01, 5.8548094e-01,
+    5.8144774e-01, 5.7740908e-01, 5.7336524e-01, 5.6931649e-01,
+    5.6526310e-01, 5.6120534e-01, 5.5714348e-01, 5.5307780e-01,
+    5.4900857e-01, 5.4493606e-01, 5.4086054e-01, 5.3678228e-01,
+    5.3270156e-01, 5.2861866e-01, 5.2453384e-01, 5.2044737e-01,
+    5.1635954e-01, 5.1227061e-01, 5.0818087e-01, 5.0409057e-01,
+    5.0000000e-01, 4.9590943e-01, 4.9181913e-01, 4.8772939e-01,
+    4.8364046e-01, 4.7955263e-01, 4.7546616e-01, 4.7138134e-01,
+    4.6729844e-01, 4.6321772e-01, 4.5913946e-01, 4.5506394e-01,
+    4.5099143e-01, 4.4692220e-01, 4.4285652e-01, 4.3879466e-01,
+    4.3473690e-01, 4.3068351e-01, 4.2663476e-01, 4.2259092e-01,
+    4.1855226e-01, 4.1451906e-01, 4.1049157e-01, 4.0647007e-01,
+    4.0245484e-01, 3.9844613e-01, 3.9444422e-01, 3.9044938e-01,
+    3.8646187e-01, 3.8248196e-01, 3.7850991e-01, 3.7454600e-01,
+    3.7059048e-01, 3.6664362e-01, 3.6270569e-01, 3.5877695e-01,
+    3.5485766e-01, 3.5094809e-01, 3.4704849e-01, 3.4315913e-01,
+    3.3928027e-01, 3.3541216e-01, 3.3155507e-01, 3.2770926e-01,
+    3.2387498e-01, 3.2005248e-01, 3.1624203e-01, 3.1244388e-01,
+    3.0865828e-01, 3.0488549e-01, 3.0112576e-01, 2.9737934e-01,
+    2.9364649e-01, 2.8992744e-01, 2.8622245e-01, 2.8253178e-01,
+    2.7885565e-01, 2.7519434e-01, 2.7154806e-01, 2.6791708e-01,
+    2.6430163e-01, 2.6070196e-01, 2.5711830e-01, 2.5355090e-01,
+    2.5000000e-01, 2.4646583e-01, 2.4294863e-01, 2.3944863e-01,
+    2.3596607e-01, 2.3250119e-01, 2.2905421e-01, 2.2562536e-01,
+    2.2221488e-01, 2.1882300e-01, 2.1544993e-01, 2.1209590e-01,
+    2.0876115e-01, 2.0544589e-01, 2.0215035e-01, 1.9887474e-01,
+    1.9561929e-01, 1.9238420e-01, 1.8916971e-01, 1.8597603e-01,
+    1.8280336e-01, 1.7965192e-01, 1.7652192e-01, 1.7341358e-01,
+    1.7032709e-01, 1.6726267e-01, 1.6422052e-01, 1.6120085e-01,
+    1.5820385e-01, 1.5522973e-01, 1.5227868e-01, 1.4935091e-01,
+    1.4644661e-01, 1.4356597e-01, 1.4070919e-01, 1.3787646e-01,
+    1.3506796e-01, 1.3228389e-01, 1.2952444e-01, 1.2678978e-01,
+    1.2408010e-01, 1.2139558e-01, 1.1873640e-01, 1.1610274e-01,
+    1.1349477e-01, 1.1091268e-01, 1.0835663e-01, 1.0582679e-01,
+    1.0332333e-01, 1.0084642e-01, 9.8396234e-02, 9.5972925e-02,
+    9.3576658e-02, 9.1207593e-02, 8.8865891e-02, 8.6551706e-02,
+    8.4265194e-02, 8.2006508e-02, 7.9775799e-02, 7.7573217e-02,
+    7.5398909e-02, 7.3253021e-02, 7.1135695e-02, 6.9047074e-02,
+    6.6987298e-02, 6.4956504e-02, 6.2954829e-02, 6.0982406e-02,
+    5.9039368e-02, 5.7125844e-02, 5.5241962e-02, 5.3387849e-02,
+    5.1563629e-02, 4.9769424e-02, 4.8005353e-02, 4.6271536e-02,
+    4.4568088e-02, 4.2895122e-02, 4.1252752e-02, 3.9641086e-02,
+    3.8060234e-02, 3.6510300e-02, 3.4991388e-02, 3.3503601e-02,
+    3.2047037e-02, 3.0621794e-02, 2.9227967e-02, 2.7865651e-02,
+    2.6534935e-02, 2.5235910e-02, 2.3968661e-02, 2.2733274e-02,
+    2.1529832e-02, 2.0358415e-02, 1.9219101e-02, 1.8111967e-02,
+    1.7037087e-02, 1.5994532e-02, 1.4984373e-02, 1.4006678e-02,
+    1.3061510e-02, 1.2148935e-02, 1.1269013e-02, 1.0421802e-02,
+    9.6073598e-03, 8.8257407e-03, 8.0769970e-03, 7.3611788e-03,
+    6.6783340e-03, 6.0285082e-03, 5.4117450e-03, 4.8280857e-03,
+    4.2775693e-03, 3.7602327e-03, 3.2761105e-03, 2.8252351e-03,
+    2.4076367e-03, 2.0233432e-03, 1.6723803e-03, 1.3547717e-03,
+    1.0705384e-03, 8.1969953e-04, 6.0227190e-04, 4.1827004e-04,
+    2.6770626e-04, 1.5059065e-04, 6.6931045e-05, 1.6733041e-05
+];
+
 /// TEN VAD ONNX model runner
 pub struct TenVad {
-    session: Session,                // ONNX session for inference
+    session: Session,                 // ONNX session for inference
     hidden_states: Vec<Array2<f32>>, // Vector of 2D arrays: [MODEL_IO_NUM - 1] each [1, MODEL_HIDDEN_DIM]
     feature_buffer: Array2<f32>,     // 2D array: [CONTEXT_WINDOW_LEN, FEATURE_LEN]
     pre_emphasis_prev: f32,          // Previous value for pre-emphasis filtering
     mel_filters: Array2<f32>,        // 2D array: [MEL_FILTER_BANK_NUM, n_bins]
-    window: Array1<f32>,             // 1D array: [WINDOW_SIZE]
+    window: ArrayView1<'static, f32>, // Hann window view: [WINDOW_SIZE]
     fft_instance: Arc<dyn Fft<f32>>, // Cached FFT instance
     fft_buffer: Vec<Complex32>,      // Reusable FFT buffer
+    stft_input_q: Vec<f32>,          // Sliding STFT input queue (pre-emphasized samples)
+    stft_windowed_buf: Array1<f32>,  // Reusable STFT windowed buffer
+    pitch_estimator: PitchEstimator, // Pitch estimator state
 }
 
 impl TenVad {
@@ -130,7 +333,7 @@ impl TenVad {
         let pre_emphasis_prev = 0.0f32;
 
         // Generate mel filter bank
-        let mel_filters = Self::generate_mel_filters();
+        let mel_filters = Self::generate_mel_filters()?;
 
         // Generate Hann window
         let window = Self::generate_hann_window();
@@ -139,6 +342,9 @@ impl TenVad {
         let mut fft_planner = FftPlanner::new();
         let fft_instance = fft_planner.plan_fft_forward(FFT_SIZE);
         let fft_buffer = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
+        let stft_input_q = vec![0.0f32; WINDOW_SIZE];
+        let stft_windowed_buf = Array1::zeros(WINDOW_SIZE);
+        let pitch_estimator = PitchEstimator::new();
 
         Ok(Self {
             session,
@@ -149,6 +355,9 @@ impl TenVad {
             window,
             fft_instance,
             fft_buffer,
+            stft_input_q,
+            stft_windowed_buf,
+            pitch_estimator,
         })
     }
 
@@ -165,7 +374,7 @@ impl TenVad {
     ///
     /// A mel filter bank is a set of filters used in audio processing to mimic the human ear's perception of sound frequencies.
     /// These filters are spaced according to the mel scale, which is more sensitive to lower frequencies and less sensitive to higher frequencies.
-    fn generate_mel_filters() -> Array2<f32> {
+    fn generate_mel_filters() -> TenVadResult<Array2<f32>> {
         let n_bins = FFT_SIZE / 2 + 1;
 
         // Generate mel filter-bank coefficients
@@ -189,8 +398,15 @@ impl TenVad {
         // Convert to FFT bin indices
         let mut bin_points = Vec::new();
         for hz in hz_points {
-            let bin = ((FFT_SIZE + 1) as f32 * hz / 16000.0f32).floor() as usize;
+            let bin = ((FFT_SIZE + 1) as f32 * hz / 16000.0f32) as usize;
             bin_points.push(bin);
+        }
+        for i in 1..bin_points.len() {
+            if bin_points[i] == bin_points[i - 1] {
+                return Err(TenVadError::InvalidConfiguration(
+                    "Duplicate mel bin points are not supported".to_string(),
+                ));
+            }
         }
 
         // Build mel filter bank as 2D array
@@ -214,17 +430,12 @@ impl TenVad {
             }
         }
 
-        mel_filters
+        Ok(mel_filters)
     }
 
     /// Generate Hann window coefficients
-    fn generate_hann_window() -> Array1<f32> {
-        let mut window = Array1::zeros(WINDOW_SIZE);
-        for i in 0..WINDOW_SIZE {
-            let value = 0.5 * (1.0 - (2.0 * PI * i as f32 / (WINDOW_SIZE - 1) as f32).cos());
-            window[i] = value;
-        }
-        window
+    fn generate_hann_window() -> ArrayView1<'static, f32> {
+        aview1(&HANN_WINDOW_768)
     }
 
     /// Pre-emphasis filtering
@@ -254,22 +465,27 @@ impl TenVad {
         // Pre-emphasis
         let emphasized = self.pre_emphasis(audio_frame);
 
-        // Zero-padding to window size
-        let mut padded = Array1::zeros(WINDOW_SIZE);
-        let copy_len = emphasized.len().min(WINDOW_SIZE);
-        padded
-            .slice_mut(ndarray::s![..copy_len])
-            .assign(&emphasized.slice(ndarray::s![..copy_len]));
+        // Sliding STFT window (hop of 256 samples in the reference pipeline).
+        let hop_size = 256.min(WINDOW_SIZE).min(emphasized.len());
+        if hop_size > 0 {
+            self.stft_input_q.copy_within(hop_size.., 0);
+            let dst_start = WINDOW_SIZE - hop_size;
+            for i in 0..hop_size {
+                self.stft_input_q[dst_start + i] = emphasized[emphasized.len() - hop_size + i];
+            }
+        }
 
-        // Windowing
-        let windowed = &padded * &self.window;
+        // Windowing into a reusable buffer.
+        for i in 0..WINDOW_SIZE {
+            self.stft_windowed_buf[i] = self.stft_input_q[i] * self.window[i];
+        }
 
         // Zero the FFT buffer before use to clear any previous data (using cached FFT instance and reusable buffer)
         self.fft_buffer.fill(Complex32::new(0.0, 0.0));
 
         // Prepare input for FFT (real to complex)
         for i in 0..WINDOW_SIZE.min(FFT_SIZE) {
-            self.fft_buffer[i] = Complex32::new(windowed[i], 0.0);
+            self.fft_buffer[i] = Complex32::new(self.stft_windowed_buf[i], 0.0);
         }
 
         // Perform FFT using cached instance
@@ -282,17 +498,18 @@ impl TenVad {
             power_spectrum[i] = self.fft_buffer[i].norm_sqr();
         }
 
-        // Normalization (corresponding to powerNormal = 32768^2 in C++)
+        // Pitch estimation consumes raw (non-pre-emphasized) signal and unnormalized bin power.
+        let pitch_freq = self
+            .pitch_estimator
+            .process(audio_frame, power_spectrum.as_slice().unwrap_or(&[]));
+
+        // Normalize mel path (corresponding to powerNormal = 32768^2 in C++).
         let power_normal = 32768.0f32.powi(2);
         power_spectrum /= power_normal;
 
         // Mel filter bank features
         let mel_features = self.mel_filters.dot(&power_spectrum);
         let mel_features = mel_features.mapv(|x| (x + EPS).ln());
-
-        // TODO: Implement pitch estimation. The original C++ code has a more complex pitch estimation algorithm.
-        // For now, pitch is hardcoded to 0.0.
-        let pitch_freq = 0.0f32;
 
         // Combine features
         let mut features = Array1::zeros(FEATURE_LEN);
@@ -385,6 +602,9 @@ impl TenVad {
 
         // Reset pre-emphasis previous value
         self.pre_emphasis_prev = 0.0f32;
+        self.stft_input_q.fill(0.0f32);
+        self.stft_windowed_buf.fill(0.0f32);
+        self.pitch_estimator.reset();
     }
 }
 
@@ -397,6 +617,9 @@ impl std::fmt::Debug for TenVad {
             .field("pre_emphasis_prev", &self.pre_emphasis_prev)
             .field("mel_filters", &self.mel_filters.shape())
             .field("window", &self.window.len())
+            .field("stft_input_q", &self.stft_input_q.len())
+            .field("stft_windowed_buf", &self.stft_windowed_buf.len())
+            .field("pitch_estimator", &self.pitch_estimator)
             .finish()
     }
 }
@@ -421,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_generate_mel_filters() {
-        let mel_filters = TenVad::generate_mel_filters();
+        let mel_filters = TenVad::generate_mel_filters().expect("Failed to generate mel filters");
 
         // Check dimensions
         assert_eq!(
@@ -458,22 +681,16 @@ mod tests {
         // Check range [0, 1]
         assert!(window.iter().all(|&x| (0.0..=1.0).contains(&x)));
 
-        // Check symmetry
-        for i in 0..WINDOW_SIZE / 2 {
-            let diff = (window[i] - window[WINDOW_SIZE - 1 - i]).abs();
-            assert!(diff < 1e-6, "Window should be symmetric");
-        }
-
-        // Check that window starts and ends near zero
-        assert!(window[0] < 0.01, "Window should start near zero");
+        // Check exact edge values from reference table.
+        assert!((window[0] - 0.0).abs() < 1e-12, "Window[0] mismatch");
         assert!(
-            window[WINDOW_SIZE - 1] < 0.01,
-            "Window should end near zero"
+            (window[WINDOW_SIZE - 1] - 1.6733041e-05).abs() < 1e-10,
+            "Window[last] mismatch"
         );
 
         // Check that window peaks near the middle
         let mid_idx = WINDOW_SIZE / 2;
-        assert!(window[mid_idx] > 0.9, "Window should peak near the middle");
+        assert!(window[mid_idx] > 0.99, "Window should peak near the middle");
     }
 
     #[test]
