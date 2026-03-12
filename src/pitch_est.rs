@@ -12,13 +12,13 @@ pub const FEAT_TIME_WINDOW: usize = 40;
 pub const FEAT_MAX_NFRM: usize = 12;
 pub const TOTAL_NFEAT: usize = 55;
 pub const PITCHMAXPATH_W: f32 = 0.02;
-pub const BAND_START_INDEX: [usize; 41] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-    25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+pub const ASSUMED_FFT_4_BAND_ENG: f32 = 80.0;
+pub const BAND_START_INDEX: [usize; NB_BANDS] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 34, 40,
 ];
 pub const BAND_LPC_COMP: [f32; NB_BANDS] = [
-    0.80, 0.86, 0.92, 0.97, 1.00, 1.02, 1.03, 1.02, 1.01, 1.00, 0.99, 0.98, 0.97, 0.96, 0.95,
-    0.94, 0.93, 0.92,
+    0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.666667, 0.5, 0.5, 0.5, 0.333333, 0.25, 0.25, 0.2,
+    0.166667, 0.173913,
 ];
 
 #[derive(Clone, Debug)]
@@ -76,6 +76,7 @@ pub struct PitchEstimator {
     xcorr_tmp: Vec<Vec<f32>>,
     xcorr_mov_scratch: Vec<f32>,
     path_scratch: Vec<usize>,
+    best_period_est_local: Vec<usize>,
     frm_weight: Vec<f32>,
     frm_weight_norm: Vec<f32>,
     pitch_max_path_reg: [Vec<f32>; 2],
@@ -112,15 +113,19 @@ impl PitchEstimator {
         let max_period = MAX_PERIOD_16KHZ / proc_resample_rate;
         let dif_period = max_period - min_period;
         let _ana_window_size = config.ana_window_size;
-        let n_feat = FEAT_MAX_NFRM.min(FEAT_TIME_WINDOW * 1000 / (config.hop_size * 1000 / 16));
+        let n_feat = FEAT_MAX_NFRM.min(
+            ((FEAT_TIME_WINDOW as f32 * 16000.0) / (config.hop_size as f32 * 1000.0)).ceil()
+                as usize,
+        );
         let n_bins = config.fft_size / 2 + 1;
         let mut dct_table = [0.0f32; NB_BANDS * NB_BANDS];
-        let scale = (2.0 / NB_BANDS as f32).sqrt();
-        for k in 0..NB_BANDS {
-            for n in 0..NB_BANDS {
-                let alpha = if k == 0 { (0.5f32).sqrt() } else { 1.0 };
-                dct_table[k * NB_BANDS + n] =
-                    alpha * scale * ((PI / NB_BANDS as f32) * (n as f32 + 0.5) * k as f32).cos();
+        for idx in 0..NB_BANDS {
+            for jdx in 0..NB_BANDS {
+                let mut v = ((idx as f32 + 0.5) * jdx as f32 * PI / NB_BANDS as f32).cos();
+                if jdx == 0 {
+                    v *= (0.5f32).sqrt();
+                }
+                dct_table[idx * NB_BANDS + jdx] = v;
             }
         }
 
@@ -128,11 +133,13 @@ impl PitchEstimator {
         let ifft_instance = planner.plan_fft_inverse(config.fft_size);
         let ifft_buffer = vec![Complex32::new(0.0, 0.0); config.fft_size];
 
-        let frame_w = n_feat.max(1);
-        let periods = dif_period + 1;
+        let frame_w = (n_feat * 2).max(1);
         let hop_size = config.hop_size;
         let decimation_step = proc_resample_rate.max(1);
         let decimated_scratch_len = (hop_size + decimation_step - 1) / decimation_step;
+        let input_q_len = XCORR_TRAINING_OFFSET.max(config.hop_size) + config.hop_size;
+        let exc_buf_shift_len = (config.hop_size + proc_resample_rate - 1) / proc_resample_rate;
+        let exc_buf_len = max_period + exc_buf_shift_len + 1;
         Self {
             config,
             proc_resample_rate,
@@ -144,11 +151,11 @@ impl PitchEstimator {
             dct_table,
             input_resample_buf: vec![0.0; 1024],
             input_resample_buf_idx: 0,
-            input_q: vec![0.0; MAX_PERIOD_16KHZ + 2048],
+            input_q: vec![0.0; input_q_len],
             aligned_in: vec![0.0; 256],
             lpc_filter_out_buf: vec![0.0; 256],
-            exc_buf: vec![0.0; 4096],
-            exc_buf_sq: vec![0.0; 4096],
+            exc_buf: vec![0.0; exc_buf_len],
+            exc_buf_sq: vec![0.0; exc_buf_len],
             lpc: [0.0; LPC_ORDER],
             lpc_scratch: [0.0f32; LPC_ORDER],
             per_bin_scratch: vec![0.0f32; n_bins],
@@ -159,15 +166,16 @@ impl PitchEstimator {
             decimated_scratch: vec![0.0f32; decimated_scratch_len.max(1)],
             tmp_feat: [0.0; TOTAL_NFEAT],
             xcorr_offset_idx: 0,
-            xcorr_inst: vec![0.0; periods],
-            xcorr: vec![vec![0.0; periods]; frame_w],
-            xcorr_tmp: vec![vec![0.0; periods]; frame_w],
-            xcorr_mov_scratch: vec![0.0f32; dif_period + 1],
-            path_scratch: vec![0usize; n_feat],
+            xcorr_inst: vec![0.0; max_period],
+            xcorr: vec![vec![0.0; max_period + 1]; frame_w],
+            xcorr_tmp: vec![vec![0.0; max_period + 1]; frame_w],
+            xcorr_mov_scratch: vec![0.0f32; max_period],
+            path_scratch: vec![0usize; n_feat * 2],
+            best_period_est_local: vec![0usize; n_feat * 2],
             frm_weight: vec![0.0; frame_w],
             frm_weight_norm: vec![0.0; frame_w],
-            pitch_max_path_reg: [vec![0.0; periods], vec![0.0; periods]],
-            pitch_prev: vec![vec![0; periods]; frame_w],
+            pitch_max_path_reg: [vec![0.0; max_period], vec![0.0; max_period]],
+            pitch_prev: vec![vec![0; max_period]; frame_w],
             pitch_max_path_all: 0.0,
             best_period_est: min_period,
             voiced: false,
@@ -220,76 +228,103 @@ impl PitchEstimator {
         self.biquad_filter.reset();
     }
 
-    fn compute_band_energy(&self, bin_power: &[f32], band_energy: &mut [f32; NB_BANDS]) {
-        let n_bins = bin_power.len().max(1);
-        for (b, be) in band_energy.iter_mut().enumerate() {
-            let bs0 = BAND_START_INDEX[b * (BAND_START_INDEX.len() - 1) / NB_BANDS];
-            let bs1 = BAND_START_INDEX[(b + 1) * (BAND_START_INDEX.len() - 1) / NB_BANDS];
-            let start = bs0 * (n_bins - 1) / BAND_START_INDEX[BAND_START_INDEX.len() - 1].max(1);
-            let end = (bs1 * (n_bins - 1)
-                / BAND_START_INDEX[BAND_START_INDEX.len() - 1].max(1))
-            .max(start + 1);
-            let mut sum = 0.0;
-            for &p in &bin_power[start..=end] {
-                sum += p.max(0.0);
-            }
-            *be = sum / (end - start + 1) as f32 + 1e-12;
+    fn compute_band_energy(&self, in_bin_power: &[f32], band_e: &mut [f32; NB_BANDS]) {
+        let n_bins = in_bin_power.len();
+        if n_bins == 0 {
+            band_e.fill(0.0);
+            return;
         }
+        let index_conv_rate = self.config.fft_size as f32 / ASSUMED_FFT_4_BAND_ENG;
+        band_e.fill(0.0);
+        for i in 0..(NB_BANDS - 1) {
+            let band_sz = (((BAND_START_INDEX[i + 1] - BAND_START_INDEX[i]) as f32)
+                * index_conv_rate)
+                .round() as usize;
+            if band_sz == 0 {
+                continue;
+            }
+            let index_offset = ((BAND_START_INDEX[i] as f32) * index_conv_rate).round() as usize;
+            for j in 0..band_sz {
+                let frac = j as f32 / band_sz as f32;
+                let acc_idx = (index_offset + j).min(n_bins - 1);
+                band_e[i] += (1.0 - frac) * in_bin_power[acc_idx];
+                band_e[i + 1] += frac * in_bin_power[acc_idx];
+            }
+        }
+        band_e[0] *= 2.0;
+        band_e[NB_BANDS - 1] *= 2.0;
     }
 
     fn dct(&self, input: &[f32; NB_BANDS], out: &mut [f32; NB_BANDS]) {
-        for (k, out_k) in out.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for (n, &x) in input.iter().enumerate() {
-                acc += self.dct_table[k * NB_BANDS + n] * x;
+        let ratio = (2.0 / NB_BANDS as f32).sqrt();
+        for idx in 0..NB_BANDS {
+            let mut sum = 0.0;
+            for j in 0..NB_BANDS {
+                sum += input[j] * self.dct_table[j * NB_BANDS + idx];
             }
-            *out_k = acc;
+            out[idx] = sum * ratio;
         }
     }
 
     fn idct(&self, input: &[f32; NB_BANDS], out: &mut [f32; NB_BANDS]) {
-        for (n, out_n) in out.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for (k, &x) in input.iter().enumerate() {
-                acc += self.dct_table[k * NB_BANDS + n] * x;
+        let ratio = (2.0 / NB_BANDS as f32).sqrt();
+        for idx in 0..NB_BANDS {
+            let mut sum = 0.0;
+            for j in 0..NB_BANDS {
+                sum += input[j] * self.dct_table[idx * NB_BANDS + j];
             }
-            *out_n = acc;
+            out[idx] = sum * ratio;
         }
     }
 
     fn interp_band_gain(band_gain: &[f32; NB_BANDS], gain_per_bin: &mut [f32]) {
-        let n = gain_per_bin.len();
-        for (i, g) in gain_per_bin.iter_mut().enumerate() {
-            let x = i as f32 * (NB_BANDS - 1) as f32 / (n - 1) as f32;
-            let i0 = x.floor() as usize;
-            let i1 = (i0 + 1).min(NB_BANDS - 1);
-            let t = x - i0 as f32;
-            *g = band_gain[i0] * (1.0 - t) + band_gain[i1] * t;
+        let n_bins = gain_per_bin.len();
+        let fft_sz = (n_bins - 1) * 2;
+        let index_conv_rate = fft_sz as f32 / ASSUMED_FFT_4_BAND_ENG;
+        gain_per_bin.fill(0.0);
+        for idx in 0..(NB_BANDS - 1) {
+            let band_sz = (((BAND_START_INDEX[idx + 1] - BAND_START_INDEX[idx]) as f32)
+                * index_conv_rate)
+                .round() as usize;
+            if band_sz == 0 {
+                continue;
+            }
+            let index_offset = (BAND_START_INDEX[idx] as f32 * index_conv_rate).round() as usize;
+            for j in 0..band_sz {
+                let frac = j as f32 / band_sz as f32;
+                let acc_idx = (index_offset + j).min(n_bins - 1);
+                gain_per_bin[acc_idx] = (1.0 - frac) * band_gain[idx] + frac * band_gain[idx + 1];
+            }
         }
     }
 
     fn celt_lpc(ac: &[f32], lpc: &mut [f32], lpc_scratch: &mut [f32; LPC_ORDER]) {
         let p = lpc.len();
-        let mut error = ac[0].max(1e-9);
         lpc_scratch[..p].fill(0.0);
-        for i in 0..p {
-            let mut rr = ac[i + 1];
-            for j in 0..i {
-                rr += lpc_scratch[j] * ac[i - j];
+        if ac[0] != 0.0 {
+            let mut error = ac[0];
+            for i in 0..p {
+                let mut rr = ac[i + 1];
+                for j in 0..i {
+                    rr += lpc_scratch[j] * ac[i - j];
+                }
+                let r = -rr / error;
+                lpc_scratch[i] = r;
+                for j in 0..(i / 2) {
+                    let aj = lpc_scratch[j];
+                    let ai = lpc_scratch[i - 1 - j];
+                    lpc_scratch[j] = aj + r * ai;
+                    lpc_scratch[i - 1 - j] = ai + r * aj;
+                }
+                if i % 2 == 1 {
+                    let j = i / 2;
+                    lpc_scratch[j] += lpc_scratch[j] * r;
+                }
+                error *= (1.0 - r * r).max(1e-6);
+                if error < 0.001 * ac[0] {
+                    break;
+                }
             }
-            let r = -rr / error;
-            lpc_scratch[i] = r;
-            for j in 0..(i / 2) {
-                let aj = lpc_scratch[j];
-                let ai = lpc_scratch[i - 1 - j];
-                lpc_scratch[j] = aj + r * ai;
-                lpc_scratch[i - 1 - j] = ai + r * aj;
-            }
-            if i % 2 == 1 {
-                let j = i / 2;
-                lpc_scratch[j] += lpc_scratch[j] * r;
-            }
-            error *= (1.0 - r * r).max(1e-6);
         }
         lpc.copy_from_slice(&lpc_scratch[..p]);
     }
@@ -298,6 +333,7 @@ impl PitchEstimator {
         let n = self.config.fft_size;
         let half = n / 2 + 1;
         Self::interp_band_gain(band_gain, &mut self.per_bin_scratch[..half]);
+        self.per_bin_scratch[half - 1] = 0.0;
 
         self.ifft_buffer.fill(Complex32::new(0.0, 0.0));
         for (i, &bin) in self.per_bin_scratch.iter().enumerate().take(half) {
@@ -312,6 +348,11 @@ impl PitchEstimator {
         for (i, a) in self.ac_scratch.iter_mut().enumerate().take(LPC_ORDER + 1) {
             *a = self.ifft_buffer[i].re / n as f32;
         }
+        let dc0_bias = self.config.ana_window_size as f32 / 12.0 / 38.0;
+        self.ac_scratch[0] += self.ac_scratch[0] * 1e-4 + dc0_bias;
+        for i in 1..=LPC_ORDER {
+            self.ac_scratch[i] *= 1.0 - 6e-5 * i as f32 * i as f32;
+        }
         Self::celt_lpc(&self.ac_scratch, lpc, &mut self.lpc_scratch);
     }
 
@@ -319,45 +360,31 @@ impl PitchEstimator {
         let mut log_band = [0.0f32; NB_BANDS];
         self.idct(cepstrum, &mut log_band);
         for i in 0..NB_BANDS {
-            log_band[i] = (log_band[i] * BAND_LPC_COMP[i]).exp().max(1e-7);
+            log_band[i] = 10.0f32.powf(log_band[i]) * BAND_LPC_COMP[i];
         }
         self.lpc_from_bands(&log_band, lpc);
-    }
-
-    fn xcorr_kernel(x: &[f32], y: &[f32]) -> f32 {
-        let n = x.len().min(y.len());
-        let mut s0 = 0.0;
-        let mut s1 = 0.0;
-        let mut s2 = 0.0;
-        let mut s3 = 0.0;
-        let mut i = 0;
-        while i + 3 < n {
-            s0 += x[i] * y[i];
-            s1 += x[i + 1] * y[i + 1];
-            s2 += x[i + 2] * y[i + 2];
-            s3 += x[i + 3] * y[i + 3];
-            i += 4;
-        }
-        let mut sum = s0 + s1 + s2 + s3;
-        while i < n {
-            sum += x[i] * y[i];
-            i += 1;
-        }
-        sum
     }
 
     fn celt_inner_prod(x: &[f32], y: &[f32]) -> f32 {
         x.iter().zip(y.iter()).map(|(a, b)| a * b).sum()
     }
 
-    fn moving_xcorr(x: &[f32], y: &[f32], out: &mut [f32]) {
-        for (i, o) in out.iter_mut().enumerate() {
-            if i >= y.len() {
-                *o = 0.0;
-                continue;
+    fn moving_xcorr(
+        corr_window_len: usize,
+        corr_shift_times: usize,
+        ref_in: &[f32],
+        y_in_to_shift: &[f32],
+        xcorr: &mut [f32],
+    ) {
+        for i in 0..corr_shift_times {
+            if i + corr_window_len > y_in_to_shift.len() || corr_window_len > ref_in.len() {
+                xcorr[i] = 0.0;
+            } else {
+                xcorr[i] = Self::celt_inner_prod(
+                    &ref_in[..corr_window_len],
+                    &y_in_to_shift[i..i + corr_window_len],
+                );
             }
-            let y_off = &y[i..];
-            *o = Self::xcorr_kernel(x, y_off);
         }
     }
 
@@ -370,8 +397,14 @@ impl PitchEstimator {
         // Phase A: LPC-based pre-filtering and 4kHz resampling.
         let mut band_energy = [0.0f32; NB_BANDS];
         self.compute_band_energy(bin_power, &mut band_energy);
+        let mut log_max = -2.0f32;
+        let mut follow = -2.0f32;
         for b in &mut band_energy {
-            *b = b.max(1e-9).ln().clamp(-20.0, 20.0);
+            let mut ly = (1e-2 + *b).log10();
+            ly = (log_max - 8.0).max((follow - 2.5).max(ly));
+            log_max = log_max.max(ly);
+            follow = (follow - 2.5).max(ly);
+            *b = ly;
         }
         let mut cep = [0.0f32; NB_BANDS];
         self.dct(&band_energy, &mut cep);
@@ -392,30 +425,27 @@ impl PitchEstimator {
             self.input_q.copy_from_slice(&raw_signal[start..]);
         }
 
-        self.aligned_in[..shift].copy_from_slice(&raw_signal[raw_signal.len() - shift..]);
+        let offset = self
+            .input_q
+            .len()
+            .saturating_sub(hop)
+            .saturating_sub(XCORR_TRAINING_OFFSET);
+        self.aligned_in[..shift].copy_from_slice(&self.input_q[offset..offset + shift]);
         for i in 0..shift {
-            let mut pred = 0.0;
+            let mut slid_win_sum = self.aligned_in[i];
             for j in 0..LPC_ORDER {
-                let past = if i > j {
-                    self.aligned_in[i - j - 1]
-                } else {
-                    self.pitch_mem[LPC_ORDER - (j + 1 - i)]
-                };
-                pred += self.lpc[j] * past;
+                slid_win_sum += self.lpc[j] * self.pitch_mem[j];
             }
-            self.lpc_filter_out_buf[i] = self.aligned_in[i] - pred;
-        }
-        if shift >= LPC_ORDER {
-            self.pitch_mem
-                .copy_from_slice(&self.aligned_in[shift - LPC_ORDER..shift]);
-        } else {
-            let keep = LPC_ORDER - shift;
-            self.pitch_mem.copy_within(shift.., 0);
-            self.pitch_mem[keep..].copy_from_slice(&self.aligned_in[..shift]);
+            self.pitch_mem.copy_within(0..LPC_ORDER - 1, 1);
+            self.pitch_mem[0] = self.aligned_in[i];
+            self.lpc_filter_out_buf[i] = slid_win_sum + 0.7 * self.pitch_filt;
+            self.pitch_filt = slid_win_sum;
         }
 
-        self.biquad_filter
-            .process(&self.lpc_filter_out_buf[..shift], &mut self.filt_scratch[..shift]);
+        self.biquad_filter.process(
+            &self.lpc_filter_out_buf[..shift],
+            &mut self.filt_scratch[..shift],
+        );
         let mut dshift_count = 0usize;
         for idx in (0..shift).step_by(self.proc_resample_rate.max(1)) {
             debug_assert!(dshift_count < self.decimated_scratch.len());
@@ -435,130 +465,165 @@ impl PitchEstimator {
         for (dst, &x) in self.exc_buf_sq.iter_mut().zip(self.exc_buf.iter()) {
             *dst = x * x;
         }
-        self.frm_weight.rotate_left(1);
-        let frm_last = self.frm_weight.len() - 1;
-        self.frm_weight[frm_last] =
-            decimated.iter().map(|x| x * x).sum::<f32>().sqrt() + 1e-9;
+        for idx in 0..(self.n_feat - 1) {
+            self.frm_weight[2 * idx] = self.frm_weight[2 * (idx + 1)];
+            self.frm_weight[2 * idx + 1] = self.frm_weight[2 * (idx + 1) + 1];
+        }
 
-        let n = self.exc_buf.len();
-        let periods = self.dif_period + 1;
-        let recent_len = (self.max_period + XCORR_TRAINING_OFFSET)
-            .min(n.saturating_sub(1))
-            .max(self.max_period + 1);
-        let base_start = n - recent_len;
-        let x = &self.exc_buf[base_start + self.max_period..];
-        self.xcorr_mov_scratch[..periods].fill(0.0);
-        Self::moving_xcorr(
-            x,
-            &self.exc_buf[base_start..base_start + self.max_period],
-            &mut self.xcorr_mov_scratch[..periods],
-        );
-        for p in self.min_period..=self.max_period {
-            let y_start = base_start + self.max_period - p;
-            let y = &self.exc_buf[y_start..y_start + x.len()];
-            let num = Self::celt_inner_prod(x, y);
-            let den =
-                (Self::celt_inner_prod(x, x) * Self::celt_inner_prod(y, y)).sqrt().max(1e-8);
-            let mut val =
-                (0.5 * (num / den + self.xcorr_mov_scratch[p - self.min_period] / den))
-                    .clamp(-1.0, 1.0);
-            if p * 2 <= self.max_period {
-                val *= 0.98;
+        let corr_half_hop_sz = hop / (self.proc_resample_rate * 2);
+        for sub in 0..2 {
+            let xcorr_acc_idx = 2 * self.xcorr_offset_idx + sub;
+            let corr_offset = sub * corr_half_hop_sz;
+            let ref_seq = &self.exc_buf[self.max_period + corr_offset..];
+            let mv_seq = &self.exc_buf[corr_offset..];
+            Self::moving_xcorr(
+                corr_half_hop_sz,
+                self.max_period,
+                ref_seq,
+                mv_seq,
+                &mut self.xcorr_inst,
+            );
+
+            let mut energy0 = 0.0f32;
+            for idx in 0..corr_half_hop_sz {
+                energy0 += self.exc_buf_sq[self.max_period + corr_offset + idx];
             }
-            if p <= self.min_period + 2 {
-                val *= 0.95;
+            self.frm_weight[2 * (self.n_feat - 1) + sub] = energy0;
+
+            let mut slid_win_sum = 0.0f32;
+            for idx in 0..corr_half_hop_sz {
+                slid_win_sum += self.exc_buf_sq[corr_offset + idx];
             }
-            self.xcorr_inst[p - self.min_period] = val.max(0.0);
+
+            let mut tmp_denom = (slid_win_sum + (1.0 + energy0)).max(1e-12);
+            self.xcorr[xcorr_acc_idx][0] = 2.0 * self.xcorr_inst[0] / tmp_denom;
+            for idx in 1..self.max_period {
+                slid_win_sum = (slid_win_sum - self.exc_buf_sq[corr_offset + idx - 1]).max(0.0);
+                slid_win_sum += self.exc_buf_sq[corr_offset + idx + corr_half_hop_sz - 1];
+                tmp_denom = (slid_win_sum + (1.0 + energy0)).max(1e-12);
+                self.xcorr[xcorr_acc_idx][idx] = 2.0 * self.xcorr_inst[idx] / tmp_denom;
+            }
+
+            for idx in 0..(self.max_period - 2 * self.min_period) {
+                let mut td = self.xcorr[xcorr_acc_idx][(self.max_period + idx) / 2];
+                td = td.max(self.xcorr[xcorr_acc_idx][(self.max_period + idx + 2) / 2]);
+                td = td.max(self.xcorr[xcorr_acc_idx][(self.max_period + idx - 1) / 2]);
+                if self.xcorr[xcorr_acc_idx][idx] < td * 1.1 {
+                    self.xcorr[xcorr_acc_idx][idx] *= 0.8;
+                }
+            }
         }
         self.xcorr_offset_idx = (self.xcorr_offset_idx + 1) % self.n_feat;
-        self.xcorr[self.xcorr_offset_idx].copy_from_slice(&self.xcorr_inst);
 
         // Phase C: DP tracking + weighted regression.
-        let wsum: f32 = self.frm_weight.iter().sum::<f32>().max(1e-9);
-        for (w, wn) in self.frm_weight.iter().zip(self.frm_weight_norm.iter_mut()) {
-            *wn = *w / wsum;
+        let mut slid_win_sum = 1e-15f32;
+        for sub in 0..(self.n_feat * 2) {
+            slid_win_sum += self.frm_weight[sub];
+        }
+        for sub in 0..(self.n_feat * 2) {
+            self.frm_weight_norm[sub] =
+                self.frm_weight[sub] * ((self.n_feat * 2) as f32 / slid_win_sum);
         }
         for (dst_row, src_row) in self.xcorr_tmp.iter_mut().zip(self.xcorr.iter()) {
             dst_row.copy_from_slice(src_row);
         }
-        self.pitch_prev.rotate_left(1);
-        let pitch_prev_last = self.pitch_prev.len() - 1;
-        self.pitch_prev[pitch_prev_last].fill(0);
+        for sub in (0..(self.n_feat * 2 - 2)).step_by(2) {
+            let (head, tail) = self.pitch_prev.split_at_mut(sub + 2);
+            head[sub].copy_from_slice(&tail[0]);
+            head[sub + 1].copy_from_slice(&tail[1]);
+        }
 
         self.pitch_max_path_reg[0].fill(0.0);
         self.pitch_max_path_reg[1].fill(0.0);
-        for t in 0..self.n_feat {
-            let curr = t % 2;
-            let prev = 1 - curr;
-            let row_idx = (self.xcorr_offset_idx + self.n_feat - (self.n_feat - 1 - t)) % self.n_feat;
-            for p in 0..periods {
-                let obs = self.xcorr_tmp[row_idx][p];
-                let mut best = -1e30;
-                let mut best_prev = 0;
-                for q in 0..periods {
-                    let d = p as f32 - q as f32;
-                    let score = self.pitch_max_path_reg[prev][q] - PITCHMAXPATH_W * d * d;
-                    if score > best {
-                        best = score;
-                        best_prev = q as i32;
+        for sub in (self.n_feat * 2 - 2)..(self.n_feat * 2) {
+            let mut xc_idx = sub + self.xcorr_offset_idx * 2;
+            if xc_idx >= 2 * self.n_feat {
+                xc_idx -= 2 * self.n_feat;
+            }
+            for idx in 0..self.dif_period {
+                let mut max_track_reg = self.pitch_max_path_all - 1e10;
+                self.pitch_prev[sub][idx] = self.best_period_est as i32;
+                let sidxt = std::cmp::min(0, 4 - idx as i32);
+                for jdx in sidxt..=4 {
+                    let cand = idx as i32 + jdx;
+                    if cand < 0 || cand as usize >= self.dif_period {
+                        continue;
+                    }
+                    let tmp_denom = self.pitch_max_path_reg[0][cand as usize]
+                        - (PITCHMAXPATH_W * (jdx.abs() as f32) * (jdx.abs() as f32));
+                    if tmp_denom > max_track_reg {
+                        max_track_reg = tmp_denom;
+                        self.pitch_prev[sub][idx] = cand;
                     }
                 }
-                self.pitch_max_path_reg[curr][p] = best + obs * self.frm_weight_norm[t];
-                self.pitch_prev[t][p] = best_prev;
+                self.pitch_max_path_reg[1][idx] =
+                    max_track_reg + self.frm_weight_norm[sub] * self.xcorr_tmp[xc_idx][idx];
+            }
+
+            let mut max_path_reg = -1e15f32;
+            let mut tmp_int = 0usize;
+            for idx in 0..self.dif_period {
+                if self.pitch_max_path_reg[1][idx] > max_path_reg {
+                    max_path_reg = self.pitch_max_path_reg[1][idx];
+                    tmp_int = idx;
+                }
+            }
+            self.pitch_max_path_all = max_path_reg;
+            self.best_period_est = tmp_int;
+            let (curr, next) = self.pitch_max_path_reg.split_at_mut(1);
+            curr[0].copy_from_slice(&next[0]);
+            for idx in 0..self.dif_period {
+                self.pitch_max_path_reg[0][idx] -= max_path_reg;
             }
         }
-        let last = (self.n_feat - 1) % 2;
-        let mut best_p = 0usize;
-        let mut best_s = -1e30;
-        for p in 0..periods {
-            let s = self.pitch_max_path_reg[last][p];
-            if s > best_s {
-                best_s = s;
-                best_p = p;
+
+        self.best_period_est_local.fill(0);
+        let mut tmp_int = self.best_period_est;
+        let mut frm_corr = 0.0f32;
+        for sub in (0..(self.n_feat * 2)).rev() {
+            self.best_period_est_local[sub] = self.max_period - tmp_int;
+            let mut xc_idx = sub + self.xcorr_offset_idx * 2;
+            if xc_idx >= 2 * self.n_feat {
+                xc_idx -= 2 * self.n_feat;
             }
+            frm_corr += self.frm_weight_norm[sub] * self.xcorr_tmp[xc_idx][tmp_int];
+            tmp_int = self.pitch_prev[sub][tmp_int] as usize;
         }
-        self.pitch_max_path_all = best_s;
-        self.path_scratch[..self.n_feat].fill(0);
-        let path = &mut self.path_scratch[..self.n_feat];
-        path[self.n_feat - 1] = best_p;
-        for t in (1..self.n_feat).rev() {
-            path[t - 1] = self.pitch_prev[t][path[t]] as usize;
-        }
-        self.best_period_est = path[self.n_feat - 1] + self.min_period;
+        frm_corr = (frm_corr / (self.n_feat * 2) as f32).max(0.0);
+        self.voiced = frm_corr >= self.config.voiced_thr;
 
-        let mut corr = 0.0;
-        for (t, p) in path.iter().enumerate() {
-            corr += self.frm_weight_norm[t] * self.xcorr_tmp[t][*p];
-        }
-        self.voiced = corr >= self.config.voiced_thr;
-
-        let mut sw = 0.0;
-        let mut st = 0.0;
-        let mut spp = 0.0;
-        let mut stp = 0.0;
-        for (t, &p) in path.iter().enumerate() {
-            let w = self.frm_weight_norm[t];
-            let tt = t as f32;
-            let pp = (p + self.min_period) as f32;
+        let mut sx = 0.0f32;
+        let mut sxx = 0.0f32;
+        let mut sxy = 0.0f32;
+        let mut sy = 0.0f32;
+        let mut sw = 0.0f32;
+        for sub in 0..(self.n_feat * 2) {
+            let w = self.frm_weight_norm[sub];
+            let sf = sub as f32;
+            let pf = self.best_period_est_local[sub] as f32;
             sw += w;
-            st += w * tt;
-            spp += w * pp;
-            stp += w * tt * pp;
+            sx += w * sf;
+            sxx += w * sf * sf;
+            sxy += w * sf * pf;
+            sy += w * pf;
         }
-        let st2: f32 = self
-            .frm_weight_norm
-            .iter()
-            .enumerate()
-            .map(|(t, w)| *w * (t as f32) * (t as f32))
-            .sum();
-        let denom = (sw * st2 - st * st).abs().max(1e-6);
-        let slope = (sw * stp - st * spp) / denom;
-        let intercept = (spp - slope * st) / sw.max(1e-6);
-        let period_est = (intercept + slope * (self.n_feat.saturating_sub(1)) as f32)
-            .clamp(self.min_period as f32, self.max_period as f32);
+        let denom = sw * sxx - sx * sx;
+        let mut best_a = if denom == 0.0 {
+            (sw * sxy - sx * sy) / 1e-15
+        } else {
+            (sw * sxy - sx * sy) / denom
+        };
+        if self.voiced {
+            let slope_lim = (sy / sw.max(1e-15)) / (4.0 * 2.0 * self.n_feat as f32);
+            best_a = best_a.clamp(-slope_lim, slope_lim);
+        } else {
+            best_a = 0.0;
+        }
+        let best_b = (sy - best_a * sx) / sw.max(1e-15);
+        let estimated_period = best_b + 5.5 * best_a;
 
         self.pitch_est_result = if self.voiced {
-            self.config.proc_fs as f32 / period_est.max(1.0)
+            self.config.proc_fs as f32 / estimated_period.max(1.0)
         } else {
             0.0
         };

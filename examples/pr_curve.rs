@@ -71,10 +71,7 @@ fn process_wav(path: &Path, vad: &mut TenVad) -> anyhow::Result<Vec<f32>> {
             })
             .collect()
     } else {
-        reader
-            .samples::<i16>()
-            .map(|s| s.unwrap_or(0))
-            .collect()
+        reader.samples::<i16>().map(|s| s.unwrap_or(0)).collect()
     };
 
     let mut audio_buffer = AudioFrameBuffer::new();
@@ -94,7 +91,11 @@ fn precision_recall(scores: &[f32], labels: &[u8], threshold: f64) -> (f64, f64)
     let (mut tp, mut fp, mut fn_count) = (0u64, 0u64, 0u64);
 
     for (&score, &label) in scores.iter().zip(labels.iter()) {
-        let predicted = if (score as f64) >= threshold { 1u8 } else { 0u8 };
+        let predicted = if (score as f64) >= threshold {
+            1u8
+        } else {
+            0u8
+        };
         match (predicted, label) {
             (1, 1) => tp += 1,
             (1, 0) => fp += 1,
@@ -121,10 +122,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
         eprintln!("Usage: {} <testset_dir> <onnx_model_path>", args[0]);
-        eprintln!(
-            "Example: {} ten-vad/testset onnx/ten-vad.onnx",
-            args[0]
-        );
+        eprintln!("Example: {} ten-vad/testset onnx/ten-vad.onnx", args[0]);
         std::process::exit(1);
     }
 
@@ -144,7 +142,11 @@ fn main() -> anyhow::Result<()> {
         .collect();
     wav_files.sort();
 
-    println!("Found {} WAV files in {}", wav_files.len(), testset_dir.display());
+    println!(
+        "Found {} WAV files in {}",
+        wav_files.len(),
+        testset_dir.display()
+    );
 
     let mut vad = TenVad::new(onnx_model_path, TARGET_SAMPLE_RATE)?;
     let mut all_scores: Vec<f32> = Vec::new();
@@ -162,7 +164,10 @@ fn main() -> anyhow::Result<()> {
 
         let frame_num = labels.len().min(scores.len());
         if frame_num < 2 {
-            eprintln!("Warning: too few frames for {}, skipping", wav_path.display());
+            eprintln!(
+                "Warning: too few frames for {}, skipping",
+                wav_path.display()
+            );
             continue;
         }
 

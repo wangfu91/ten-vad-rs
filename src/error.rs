@@ -11,6 +11,9 @@ pub enum TenVadError {
 
     #[error("Unsupported sample rate: {0}Hz. TEN VAD only supports 16kHz")]
     UnsupportedSampleRate(u32),
+
+    #[error("Invalid configuration: {0}")]
+    InvalidConfiguration(String),
 }
 
 /// Type alias for TenVAD results
