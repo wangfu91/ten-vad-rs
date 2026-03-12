@@ -62,13 +62,20 @@ pub struct PitchEstimator {
     exc_buf: Vec<f32>,
     exc_buf_sq: Vec<f32>,
     lpc: [f32; LPC_ORDER],
+    lpc_scratch: [f32; LPC_ORDER],
+    per_bin_scratch: Vec<f32>,
+    ac_scratch: [f32; LPC_ORDER + 1],
     pitch_mem: [f32; LPC_ORDER],
     pitch_filt: f32,
+    filt_scratch: Vec<f32>,
+    decimated_scratch: Vec<f32>,
     tmp_feat: [f32; TOTAL_NFEAT],
     xcorr_offset_idx: usize,
     xcorr_inst: Vec<f32>,
     xcorr: Vec<Vec<f32>>,
     xcorr_tmp: Vec<Vec<f32>>,
+    xcorr_mov_scratch: Vec<f32>,
+    path_scratch: Vec<usize>,
     frm_weight: Vec<f32>,
     frm_weight_norm: Vec<f32>,
     pitch_max_path_reg: [Vec<f32>; 2],
@@ -123,6 +130,9 @@ impl PitchEstimator {
 
         let frame_w = n_feat.max(1);
         let periods = dif_period + 1;
+        let hop_size = config.hop_size;
+        let decimation_step = proc_resample_rate.max(1);
+        let decimated_scratch_len = (hop_size + decimation_step - 1) / decimation_step;
         Self {
             config,
             proc_resample_rate,
@@ -140,13 +150,20 @@ impl PitchEstimator {
             exc_buf: vec![0.0; 4096],
             exc_buf_sq: vec![0.0; 4096],
             lpc: [0.0; LPC_ORDER],
+            lpc_scratch: [0.0f32; LPC_ORDER],
+            per_bin_scratch: vec![0.0f32; n_bins],
+            ac_scratch: [0.0f32; LPC_ORDER + 1],
             pitch_mem: [0.0; LPC_ORDER],
             pitch_filt: 0.0,
+            filt_scratch: vec![0.0f32; hop_size],
+            decimated_scratch: vec![0.0f32; decimated_scratch_len.max(1)],
             tmp_feat: [0.0; TOTAL_NFEAT],
             xcorr_offset_idx: 0,
             xcorr_inst: vec![0.0; periods],
             xcorr: vec![vec![0.0; periods]; frame_w],
             xcorr_tmp: vec![vec![0.0; periods]; frame_w],
+            xcorr_mov_scratch: vec![0.0f32; dif_period + 1],
+            path_scratch: vec![0usize; n_feat],
             frm_weight: vec![0.0; frame_w],
             frm_weight_norm: vec![0.0; frame_w],
             pitch_max_path_reg: [vec![0.0; periods], vec![0.0; periods]],
@@ -170,8 +187,13 @@ impl PitchEstimator {
         self.exc_buf.fill(0.0);
         self.exc_buf_sq.fill(0.0);
         self.lpc = [0.0; LPC_ORDER];
+        self.lpc_scratch.fill(0.0);
+        self.per_bin_scratch.fill(0.0);
+        self.ac_scratch.fill(0.0);
         self.pitch_mem = [0.0; LPC_ORDER];
         self.pitch_filt = 0.0;
+        self.filt_scratch.fill(0.0);
+        self.decimated_scratch.fill(0.0);
         self.tmp_feat = [0.0; TOTAL_NFEAT];
         self.xcorr_offset_idx = 0;
         self.xcorr_inst.fill(0.0);
@@ -181,6 +203,8 @@ impl PitchEstimator {
         for row in &mut self.xcorr_tmp {
             row.fill(0.0);
         }
+        self.xcorr_mov_scratch.fill(0.0);
+        self.path_scratch.fill(0);
         self.frm_weight.fill(0.0);
         self.frm_weight_norm.fill(0.0);
         for reg in &mut self.pitch_max_path_reg {
@@ -233,7 +257,7 @@ impl PitchEstimator {
         }
     }
 
-    fn interp_band_gain(&self, band_gain: &[f32; NB_BANDS], gain_per_bin: &mut [f32]) {
+    fn interp_band_gain(band_gain: &[f32; NB_BANDS], gain_per_bin: &mut [f32]) {
         let n = gain_per_bin.len();
         for (i, g) in gain_per_bin.iter_mut().enumerate() {
             let x = i as f32 * (NB_BANDS - 1) as f32 / (n - 1) as f32;
@@ -244,40 +268,39 @@ impl PitchEstimator {
         }
     }
 
-    fn celt_lpc(&self, ac: &[f32], lpc: &mut [f32]) {
+    fn celt_lpc(ac: &[f32], lpc: &mut [f32], lpc_scratch: &mut [f32; LPC_ORDER]) {
         let p = lpc.len();
         let mut error = ac[0].max(1e-9);
-        let mut a = vec![0.0f32; p];
+        lpc_scratch[..p].fill(0.0);
         for i in 0..p {
             let mut rr = ac[i + 1];
             for j in 0..i {
-                rr += a[j] * ac[i - j];
+                rr += lpc_scratch[j] * ac[i - j];
             }
             let r = -rr / error;
-            a[i] = r;
+            lpc_scratch[i] = r;
             for j in 0..(i / 2) {
-                let aj = a[j];
-                let ai = a[i - 1 - j];
-                a[j] = aj + r * ai;
-                a[i - 1 - j] = ai + r * aj;
+                let aj = lpc_scratch[j];
+                let ai = lpc_scratch[i - 1 - j];
+                lpc_scratch[j] = aj + r * ai;
+                lpc_scratch[i - 1 - j] = ai + r * aj;
             }
             if i % 2 == 1 {
                 let j = i / 2;
-                a[j] += a[j] * r;
+                lpc_scratch[j] += lpc_scratch[j] * r;
             }
             error *= (1.0 - r * r).max(1e-6);
         }
-        lpc.copy_from_slice(&a);
+        lpc.copy_from_slice(&lpc_scratch[..p]);
     }
 
     fn lpc_from_bands(&mut self, band_gain: &[f32; NB_BANDS], lpc: &mut [f32; LPC_ORDER]) {
         let n = self.config.fft_size;
         let half = n / 2 + 1;
-        let mut per_bin = vec![0.0f32; half];
-        self.interp_band_gain(band_gain, &mut per_bin);
+        Self::interp_band_gain(band_gain, &mut self.per_bin_scratch[..half]);
 
         self.ifft_buffer.fill(Complex32::new(0.0, 0.0));
-        for (i, &bin) in per_bin.iter().enumerate().take(half) {
+        for (i, &bin) in self.per_bin_scratch.iter().enumerate().take(half) {
             self.ifft_buffer[i] = Complex32::new(bin, 0.0);
         }
         for i in 1..(n / 2) {
@@ -285,11 +308,11 @@ impl PitchEstimator {
         }
         self.ifft_instance.process(&mut self.ifft_buffer);
 
-        let mut ac = vec![0.0f32; LPC_ORDER + 1];
-        for (i, a) in ac.iter_mut().enumerate().take(LPC_ORDER + 1) {
+        self.ac_scratch.fill(0.0);
+        for (i, a) in self.ac_scratch.iter_mut().enumerate().take(LPC_ORDER + 1) {
             *a = self.ifft_buffer[i].re / n as f32;
         }
-        self.celt_lpc(&ac, lpc);
+        Self::celt_lpc(&self.ac_scratch, lpc, &mut self.lpc_scratch);
     }
 
     fn lpc_compute(&mut self, cepstrum: &[f32; NB_BANDS], lpc: &mut [f32; LPC_ORDER]) {
@@ -327,7 +350,7 @@ impl PitchEstimator {
         x.iter().zip(y.iter()).map(|(a, b)| a * b).sum()
     }
 
-    fn moving_xcorr(&self, x: &[f32], y: &[f32], out: &mut [f32]) {
+    fn moving_xcorr(x: &[f32], y: &[f32], out: &mut [f32]) {
         for (i, o) in out.iter_mut().enumerate() {
             if i >= y.len() {
                 *o = 0.0;
@@ -391,13 +414,15 @@ impl PitchEstimator {
             self.pitch_mem[keep..].copy_from_slice(&self.aligned_in[..shift]);
         }
 
-        let mut filt = vec![0.0f32; shift];
         self.biquad_filter
-            .process(&self.lpc_filter_out_buf[..shift], &mut filt);
-        let mut decimated = Vec::with_capacity((shift / self.proc_resample_rate).max(1));
-        for idx in (0..filt.len()).step_by(self.proc_resample_rate.max(1)) {
-            decimated.push(filt[idx]);
+            .process(&self.lpc_filter_out_buf[..shift], &mut self.filt_scratch[..shift]);
+        let mut dshift_count = 0usize;
+        for idx in (0..shift).step_by(self.proc_resample_rate.max(1)) {
+            debug_assert!(dshift_count < self.decimated_scratch.len());
+            self.decimated_scratch[dshift_count] = self.filt_scratch[idx];
+            dshift_count += 1;
         }
+        let decimated = &self.decimated_scratch[..dshift_count];
 
         let dshift = decimated.len().min(self.exc_buf.len());
         if dshift < self.exc_buf.len() {
@@ -422,15 +447,21 @@ impl PitchEstimator {
             .max(self.max_period + 1);
         let base_start = n - recent_len;
         let x = &self.exc_buf[base_start + self.max_period..];
-        let mut xcorr_mov = vec![0.0f32; periods];
-        self.moving_xcorr(x, &self.exc_buf[base_start..base_start + self.max_period], &mut xcorr_mov);
+        self.xcorr_mov_scratch[..periods].fill(0.0);
+        Self::moving_xcorr(
+            x,
+            &self.exc_buf[base_start..base_start + self.max_period],
+            &mut self.xcorr_mov_scratch[..periods],
+        );
         for p in self.min_period..=self.max_period {
             let y_start = base_start + self.max_period - p;
             let y = &self.exc_buf[y_start..y_start + x.len()];
             let num = Self::celt_inner_prod(x, y);
             let den =
                 (Self::celt_inner_prod(x, x) * Self::celt_inner_prod(y, y)).sqrt().max(1e-8);
-            let mut val = (0.5 * (num / den + xcorr_mov[p - self.min_period] / den)).clamp(-1.0, 1.0);
+            let mut val =
+                (0.5 * (num / den + self.xcorr_mov_scratch[p - self.min_period] / den))
+                    .clamp(-1.0, 1.0);
             if p * 2 <= self.max_period {
                 val *= 0.98;
             }
@@ -447,7 +478,9 @@ impl PitchEstimator {
         for (w, wn) in self.frm_weight.iter().zip(self.frm_weight_norm.iter_mut()) {
             *wn = *w / wsum;
         }
-        self.xcorr_tmp.clone_from(&self.xcorr);
+        for (dst_row, src_row) in self.xcorr_tmp.iter_mut().zip(self.xcorr.iter()) {
+            dst_row.copy_from_slice(src_row);
+        }
         self.pitch_prev.rotate_left(1);
         let pitch_prev_last = self.pitch_prev.len() - 1;
         self.pitch_prev[pitch_prev_last].fill(0);
@@ -485,7 +518,8 @@ impl PitchEstimator {
             }
         }
         self.pitch_max_path_all = best_s;
-        let mut path = vec![0usize; self.n_feat];
+        self.path_scratch[..self.n_feat].fill(0);
+        let path = &mut self.path_scratch[..self.n_feat];
         path[self.n_feat - 1] = best_p;
         for t in (1..self.n_feat).rev() {
             path[t - 1] = self.pitch_prev[t][path[t]] as usize;
