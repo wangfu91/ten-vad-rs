@@ -136,9 +136,9 @@ impl PitchEstimator {
         let frame_w = (n_feat * 2).max(1);
         let hop_size = config.hop_size;
         let decimation_step = proc_resample_rate.max(1);
-        let decimated_scratch_len = (hop_size + decimation_step - 1) / decimation_step;
+        let decimated_scratch_len = hop_size.div_ceil(decimation_step);
         let input_q_len = XCORR_TRAINING_OFFSET.max(config.hop_size) + config.hop_size;
-        let exc_buf_shift_len = (config.hop_size + proc_resample_rate - 1) / proc_resample_rate;
+        let exc_buf_shift_len = config.hop_size.div_ceil(decimation_step);
         let exc_buf_len = max_period + exc_buf_shift_len + 1;
         Self {
             config,
@@ -257,23 +257,23 @@ impl PitchEstimator {
 
     fn dct(&self, input: &[f32; NB_BANDS], out: &mut [f32; NB_BANDS]) {
         let ratio = (2.0 / NB_BANDS as f32).sqrt();
-        for idx in 0..NB_BANDS {
+        for (idx, out_item) in out.iter_mut().enumerate().take(NB_BANDS) {
             let mut sum = 0.0;
-            for j in 0..NB_BANDS {
-                sum += input[j] * self.dct_table[j * NB_BANDS + idx];
+            for (j, input_item) in input.iter().enumerate().take(NB_BANDS) {
+                sum += *input_item * self.dct_table[j * NB_BANDS + idx];
             }
-            out[idx] = sum * ratio;
+            *out_item = sum * ratio;
         }
     }
 
     fn idct(&self, input: &[f32; NB_BANDS], out: &mut [f32; NB_BANDS]) {
         let ratio = (2.0 / NB_BANDS as f32).sqrt();
-        for idx in 0..NB_BANDS {
+        for (idx, out_item) in out.iter_mut().enumerate().take(NB_BANDS) {
             let mut sum = 0.0;
-            for j in 0..NB_BANDS {
-                sum += input[j] * self.dct_table[idx * NB_BANDS + j];
+            for (j, input_item) in input.iter().enumerate().take(NB_BANDS) {
+                sum += *input_item * self.dct_table[idx * NB_BANDS + j];
             }
-            out[idx] = sum * ratio;
+            *out_item = sum * ratio;
         }
     }
 
@@ -391,8 +391,7 @@ impl PitchEstimator {
                 let mut sum1 = 0.0f32;
                 let mut sum2 = 0.0f32;
                 let mut sum3 = 0.0f32;
-                for j in 0..corr_window_len {
-                    let x = ref_in[j];
+                for (j, &x) in ref_in.iter().enumerate().take(corr_window_len) {
                     let base = i + j;
                     sum0 += x * y_in_to_shift[base];
                     sum1 += x * y_in_to_shift[base + 1];
