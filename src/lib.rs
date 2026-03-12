@@ -1128,12 +1128,16 @@ mod tests {
         // Different inputs should potentially produce different outputs
         assert!(score1.is_finite() && score2.is_finite());
 
+        // Reset both instances so they evaluate the same frame from the same recurrent state.
+        vad1.reset();
+        vad2.reset();
+
         // Process same frame with both instances
         let same_frame = vec![150i16; 256];
         let score1_same = vad1.process_frame(&same_frame).unwrap();
         let score2_same = vad2.process_frame(&same_frame).unwrap();
 
-        // Should produce same result for same input
+        // Should produce same result for same input when their state is aligned.
         assert!(
             (score1_same - score2_same).abs() < 0.01,
             "Different instances should produce similar results for same input"
