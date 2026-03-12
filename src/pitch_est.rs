@@ -177,7 +177,7 @@ impl PitchEstimator {
             pitch_max_path_reg: [vec![0.0; max_period], vec![0.0; max_period]],
             pitch_prev: vec![vec![0; max_period]; frame_w],
             pitch_max_path_all: 0.0,
-            best_period_est: min_period,
+            best_period_est: 0,
             voiced: false,
             pitch_est_result: 0.0,
             biquad_filter: BiquadFilter::new(&AUP_PE_B_4KHZ, &AUP_PE_A_4KHZ, &AUP_PE_G_4KHZ),
@@ -222,7 +222,7 @@ impl PitchEstimator {
             row.fill(0);
         }
         self.pitch_max_path_all = 0.0;
-        self.best_period_est = self.min_period;
+        self.best_period_est = 0;
         self.voiced = false;
         self.pitch_est_result = 0.0;
         self.biquad_filter.reset();
@@ -320,7 +320,7 @@ impl PitchEstimator {
                     let j = i / 2;
                     lpc_scratch[j] += lpc_scratch[j] * r;
                 }
-                error *= (1.0 - r * r).max(1e-6);
+                error = error - r * r * error;
                 if error < 0.001 * ac[0] {
                     break;
                 }
@@ -376,8 +376,39 @@ impl PitchEstimator {
         y_in_to_shift: &[f32],
         xcorr: &mut [f32],
     ) {
-        for i in 0..corr_shift_times {
-            if i + corr_window_len > y_in_to_shift.len() || corr_window_len > ref_in.len() {
+        let work = corr_shift_times.min(xcorr.len());
+        let valid_ref = corr_window_len <= ref_in.len();
+        let mut i = 0usize;
+
+        while i + 3 < work {
+            if !valid_ref || i + corr_window_len + 3 > y_in_to_shift.len() {
+                xcorr[i] = 0.0;
+                xcorr[i + 1] = 0.0;
+                xcorr[i + 2] = 0.0;
+                xcorr[i + 3] = 0.0;
+            } else {
+                let mut sum0 = 0.0f32;
+                let mut sum1 = 0.0f32;
+                let mut sum2 = 0.0f32;
+                let mut sum3 = 0.0f32;
+                for j in 0..corr_window_len {
+                    let x = ref_in[j];
+                    let base = i + j;
+                    sum0 += x * y_in_to_shift[base];
+                    sum1 += x * y_in_to_shift[base + 1];
+                    sum2 += x * y_in_to_shift[base + 2];
+                    sum3 += x * y_in_to_shift[base + 3];
+                }
+                xcorr[i] = sum0;
+                xcorr[i + 1] = sum1;
+                xcorr[i + 2] = sum2;
+                xcorr[i + 3] = sum3;
+            }
+            i += 4;
+        }
+
+        while i < work {
+            if !valid_ref || i + corr_window_len > y_in_to_shift.len() {
                 xcorr[i] = 0.0;
             } else {
                 xcorr[i] = Self::celt_inner_prod(
@@ -385,6 +416,11 @@ impl PitchEstimator {
                     &y_in_to_shift[i..i + corr_window_len],
                 );
             }
+            i += 1;
+        }
+
+        for item in xcorr.iter_mut().skip(work) {
+            *item = 0.0;
         }
     }
 
