@@ -18,7 +18,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ten-vad-rs = "0.1.5" # Replace with the latest version
+ten-vad-rs = "0.1.6" # Replace with the latest version
 ```
 
 ## 🚀 Quick Start
