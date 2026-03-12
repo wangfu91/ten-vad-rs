@@ -358,14 +358,18 @@ impl PitchEstimator {
             self.lpc = lpc_new;
         }
 
-        let shift = raw_signal.len().min(self.input_q.len());
+        let hop = self.aligned_in.len();
+        let shift = raw_signal.len().min(hop);
         if shift < self.input_q.len() {
             self.input_q.copy_within(shift.., 0);
             let tail_start = self.input_q.len() - shift;
             self.input_q[tail_start..].copy_from_slice(&raw_signal[..shift]);
+        } else {
+            let start = raw_signal.len() - self.input_q.len();
+            self.input_q.copy_from_slice(&raw_signal[start..]);
         }
 
-        self.aligned_in[..shift].copy_from_slice(&raw_signal[..shift]);
+        self.aligned_in[..shift].copy_from_slice(&raw_signal[raw_signal.len() - shift..]);
         for i in 0..shift {
             let mut pred = 0.0;
             for j in 0..LPC_ORDER {

@@ -48,7 +48,7 @@ This produces `PR_data_TEN_VAD_RS.txt` with threshold / precision / recall rows.
 The data can be compared to the base ten-vad implementation's PR curve results.
 
 
-![pr curves](/media/pr_curves.png)
+![pr curves](media/pr_curves.png)
 
 
 ## 🛠️ Building
