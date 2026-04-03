@@ -13,7 +13,7 @@ pub use crate::error::{TenVadError, TenVadResult};
 pub const TARGET_SAMPLE_RATE: u32 = 16000;
 
 use ndarray::{Array1, Array2, ArrayView1, Axis, aview1};
-use ort::session::builder::GraphOptimizationLevel;
+use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 use ort::session::{SessionInputValue, SessionInputs};
 use ort::{session::Session, value::TensorRef};
 use pitch_est::PitchEstimator;
@@ -297,7 +297,7 @@ impl TenVad {
             return Err(TenVadError::UnsupportedSampleRate(sample_rate));
         }
 
-        let builder = Self::configure_session_builder()?;
+        let mut builder = Self::configure_session_builder()?;
         let session = builder.commit_from_file(onnx_model_path)?;
 
         Self::from_session(session)
@@ -312,7 +312,7 @@ impl TenVad {
             return Err(TenVadError::UnsupportedSampleRate(sample_rate));
         }
 
-        let builder = Self::configure_session_builder()?;
+        let mut builder = Self::configure_session_builder()?;
         let session = builder.commit_from_memory(model_bytes)?;
 
         Self::from_session(session)
@@ -362,12 +362,11 @@ impl TenVad {
     }
 
     /// Configure a common Session builder with project defaults (optimization level and threads).
-    fn configure_session_builder() -> TenVadResult<ort::session::builder::SessionBuilder> {
-        let builder = Session::builder()?
+    fn configure_session_builder() -> TenVadResult<SessionBuilder> {
+        Ok(Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(1)?
-            .with_inter_threads(1)?;
-        Ok(builder)
+            .with_inter_threads(1)?)
     }
 
     /// Generate mel filter-bank coefficients(Adapted from aed.cc).
