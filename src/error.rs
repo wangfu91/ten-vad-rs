@@ -1,3 +1,4 @@
+use ort::session::builder::SessionBuilder;
 use thiserror::Error;
 
 /// Custom error types for TenVAD operations
@@ -14,6 +15,13 @@ pub enum TenVadError {
 
     #[error("Invalid configuration: {0}")]
     InvalidConfiguration(String),
+}
+
+/// Implement conversion from ort::Error to TenVadError
+impl From<ort::Error<SessionBuilder>> for TenVadError {
+    fn from(value: ort::Error<SessionBuilder>) -> Self {
+        Self::OnnxRuntimeError(value.into())
+    }
 }
 
 /// Type alias for TenVAD results
