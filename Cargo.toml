@@ -17,18 +17,18 @@ panic = "abort"
 strip = true
 
 [dependencies]
-ndarray = "0.17.1"
+ndarray = "0.17.2"
 ort = "2.0.0-rc.12"
-rubato = "1.0.0"
-thiserror = "2.0.17"
-rustfft = "6.2.0"
-log = "0.4.27"
+rubato = "2.0.0"
+thiserror = "2.0.18"
+rustfft = "6.4.1"
+log = "0.4.29"
 
 [dev-dependencies]
 hound = "3.5.1"
-cpal = "0.17.1"
-anyhow = "1.0.98"
-audioadapter-buffers = "2.0.0"
+cpal = "0.17.3"
+anyhow = "1.0.102"
+audioadapter-buffers = "3.0.0"
 
 [[example]]
 name = "pr_curve"
